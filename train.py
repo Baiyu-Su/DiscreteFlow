@@ -129,22 +129,21 @@ class DataCollatorFlow:
 
         B = X1.size(0)
         # Reshape to (batch_size, M, (N-1), embed_dim) for block-wise processing
-        X1_blocks = X1.view(B, self.M, self.block_text_len, self.embed_dim)
+        X1 = X1.view(B, self.M, self.block_text_len, self.embed_dim)
 
         # Step 2: sample t ~ Uniform(0, 1) for each block => shape (B, M)
-        # i.e. each block has its own t
         t_values = torch.rand((B, self.M))
 
         # Step 3: sample noise X0 => same shape as X1 => (B, context_length, embed_dim)
         X0 = torch.randn_like(X1)
 
         # For easier block-wise merges, reshape X0 as well
-        X0_blocks = X0.view(B, self.M, self.block_text_len, self.embed_dim)
+        X0 = X0.view(B, self.M, self.block_text_len, self.embed_dim)
 
         # Step 4: perturb to make noisy blocks t: X_t = t * X1 + (1 - t) * X0
         # We have t shaped (B, M). We need to broadcast across (N-1, embed_dim)
         t_values_4d = t_values.view(B, self.M, 1, 1)  # shape => (B, M, 1, 1)
-        Xt_blocks = t_values_4d * X1_blocks + (1 - t_values_4d) * X0_blocks
+        Xt = t_values_4d * X1 + (1 - t_values_4d) * X0
         # shape => (B, M, N-1, embed_dim)
 
         # Step 5: append time embedding to each block
@@ -157,12 +156,12 @@ class DataCollatorFlow:
 
         # 1) For PART 2, just cat along dim=2
         part2_blocks = torch.cat(
-            [Xt_blocks, t_embeddings.unsqueeze(2)],  # => (B, M, 1, embed_dim)
+            [Xt, t_embeddings.unsqueeze(2)],  # => (B, M, 1, embed_dim)
             dim=2
         )  # => shape (B, M, N, embed_dim)
 
         # Flatten the (M, N) dimensions
-        part2 = part2_blocks.view(B, M*N, embed_dim)  # (B, M*N, embed_dim)
+        part2 = part2_blocks.view(B, M*N, self.embed_dim)  # (B, M*N, embed_dim)
 
         # 2) For PART 1, we do the same logic but with t=1 for all blocks
         #    Suppose X1_blocks_reshaped is (B, M, (N-1), embed_dim)
@@ -170,11 +169,11 @@ class DataCollatorFlow:
         ones = torch.ones((B, self.M), device=X1.device)
         t1_embeddings = self.time_embedding_module(ones)  # (B, M, embed_dim)
         part1_blocks = torch.cat(
-            [X1_blocks, t1_embeddings.unsqueeze(2)],  # => (B, M, 1, embed_dim)
+            [X1, t1_embeddings.unsqueeze(2)],  # => (B, M, 1, embed_dim)
             dim=2
         )  # => (B, M, N, embed_dim)
 
-        part1 = part1_blocks.view(B, M*N, embed_dim)  # (B, M*N, embed_dim)
+        part1 = part1_blocks.view(B, M*N, self.embed_dim)  # (B, M*N, embed_dim)
 
         # 3) Finally, concat Part1 and Part2 along dimension=1
         final_input = torch.cat([part1, part2], dim=1)  # => (B, 2*M*N, embed_dim)
@@ -183,12 +182,10 @@ class DataCollatorFlow:
             "input_embeddings": final_input,  # shape [B, 2*(M*N), embed_dim]
             # Return the original tokens as labels
             "labels": input_ids_tensor,       # shape [B, context_length]
-            # Maybe attention mask here?
         }
 
 
 def main():
-    
     # Parse arguments
     parser = argparse.ArgumentParser()
     parser.add_argument(

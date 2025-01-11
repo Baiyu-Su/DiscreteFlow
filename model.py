@@ -225,7 +225,7 @@ def build_block_causal_mask(M: int, N: int, device: torch.device = torch.device(
     return mask
 
 class FlowLlamaModel(nn.Module):
-    def __init__(self, config: DiscreteFlowConfig, M=8, N=128):
+    def __init__(self, config: DiscreteFlowConfig, M=8, N=128, pretrain=False):
         super().__init__()
         self.config = config
         self.M = M
