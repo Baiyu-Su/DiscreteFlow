@@ -2,6 +2,8 @@ class MyConfig:
     M = 8
     N = 128
 
+    output_dir = "./out"
+
     # Model config
     vocab_size = 32000
     hidden_size = 1024
@@ -18,7 +20,8 @@ class MyConfig:
     t5_tokenizer_checkpoint = "t5-base"
     
     per_device_train_batch_size = 20
-    gradient_accumulation_steps=18
+    gradient_accumulation_steps = 18
     
-    logging_steps=50
-    dataloader_num_workers=2
+    logging_steps = 50
+    dataloader_num_workers = 2
+    max_steps = 10000

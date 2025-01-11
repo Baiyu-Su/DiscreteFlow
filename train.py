@@ -103,6 +103,7 @@ class DataCollatorFlow:
         batch_input_ids = []
         for f in features:
             # We just take input_ids
+            print(f)
             ids = f["input_ids"]
             # Truncate or pad to exactly self.context_length
             if len(ids) >= self.context_length:
@@ -199,14 +200,17 @@ def main():
 
     
     # 1) Build the T5 tokenizer
-    tokenizer = T5Tokenizer.from_pretrained(cfg.t5_tokenizer_checkpoint)
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
     # 2) Load the LLaMA (or open-llama) base model to extract embeddings
-    base_model = AutoModel.from_pretrained(cfg.llama_checkpoint)
+    base_model = AutoModel.from_pretrained(
+        cfg.llama_checkpoint,
+        trust_remote_code=True
+    )
     # This base_model should have an embedding dimension we can find:
     embed_dim = base_model.config.hidden_size  # e.g. 1024 or 4096, etc.
     print("Embedding dimension:", embed_dim)
-    pretrained_token_embedding = base_model.model.embed_tokens
+    pretrained_token_embedding = base_model.get_input_embeddings()
     # Freeze embedding parameters
     for param in pretrained_token_embedding.parameters():
         param.requires_grad = False
@@ -214,26 +218,20 @@ def main():
 
     # TODO: Streaming and fit the length of need
     dataset = load_dataset(
-        "c4", 
-        "en", 
+        "openwebtext",
         split="train",
         streaming=True,
         cache_dir="./.hf_cache"
     )
 
     def tokenize_function(examples):
-        return tokenizer(examples["text"], truncation=True, max_length=200, return_tensors=None)
+        return tokenizer(examples["text"], truncation=True, max_length=1024, return_tensors=None)
 
-    tokenized_dataset = dataset.map(tokenize_function, batched=True)
+    tokenized_dataset = dataset.map(tokenize_function, batched=False, remove_columns=["text"])
 
-    print("Sample tokenized data:", tokenized_dataset[0])
+    print("Sample tokenized data:", next(iter(tokenized_dataset)))
 
-    def get_train_dataset(num_samples=10000):
-        # For demonstration, we create a small subset of the dataset
-        # Adjust as needed
-        return tokenized_dataset.select(range(num_samples))
-
-    train_data = get_train_dataset()
+    train_data = tokenized_dataset
 
     time_embedding_module = SinusoidalTimeEmbedding(embed_dim=embed_dim)
 
@@ -265,14 +263,15 @@ def main():
         num_train_epochs=1,
         per_device_train_batch_size=cfg.per_device_train_batch_size,
         gradient_accumulation_steps=cfg.gradient_accumulation_steps,
-        logging_steps=cfg.logging_steps,  
+        logging_steps=cfg.logging_steps,
+        max_steps=cfg.max_steps,
     )
 
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_data,
-        data_collator=data_collator_flow
+        data_collator=data_collator_flow,
     )
     
     trainer.train()
