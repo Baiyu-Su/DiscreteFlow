@@ -19,12 +19,6 @@ from datasets import load_dataset
 from model import DiscreteFlowModel, DiscreteFlowConfig
 
 
-M = 8       # number of blocks
-N = 128     # tokens per block (127 tokens + 1 time token)
-BLOCK_TEXT_LENGTH = N - 1  # 127
-CONTEXT_LENGTH = M * BLOCK_TEXT_LENGTH  # 8 * 127 = 1016
-
-
 class SinusoidalTimeEmbedding(nn.Module):
     """
     Maps scalar t in [0, 1] to an embedding of dimension embed_dim.
@@ -241,8 +235,8 @@ def main():
         pretrained_token_embedding=pretrained_token_embedding,
         time_embedding_module=time_embedding_module,
         tokenizer=tokenizer,
-        M=M,
-        N=N
+        M=cfg.M,
+        N=cfg.N
     )
 
     model_config = DiscreteFlowConfig(
