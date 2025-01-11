@@ -213,7 +213,13 @@ def main():
 
 
     # TODO: Streaming and fit the length of need
-    dataset = load_dataset("c4", "en", split="train")
+    dataset = load_dataset(
+        "c4", 
+        "en", 
+        split="train",
+        streaming=True,
+        cache_dir="./.hf_cache"
+    )
 
     def tokenize_function(examples):
         return tokenizer(examples["text"], truncation=True, max_length=200, return_tensors=None)
@@ -254,10 +260,12 @@ def main():
 
 
     training_args = TrainingArguments(
-        output_dir="./test-flow-model",
+        output_dir=cfg.output_dir,
         evaluation_strategy="no",
         num_train_epochs=1,
-        per_device_train_batch_size=2
+        per_device_train_batch_size=cfg.per_device_train_batch_size,
+        gradient_accumulation_steps=cfg.gradient_accumulation_steps,
+        logging_steps=cfg.logging_steps,  
     )
 
     trainer = Trainer(
