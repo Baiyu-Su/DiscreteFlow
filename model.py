@@ -180,92 +180,49 @@ class DiscreteFlowBlock(nn.Module):
         hidden_states = hidden_states + feedforward_out
         return hidden_states
 
-def build_block_causal_mask(
-    M: int, 
-    N: int, 
-    device: torch.device = torch.device("cpu")
-):
+def build_block_causal_mask(M: int, N: int, device: torch.device = torch.device("cpu")):
     """
-    Returns a mask of shape (2*M*N, 2*M*N)
+    Returns a mask of shape (2*M*N, 2*M*N),
     where 0 => can attend, -inf => block.
 
-    Indices:
-      Part 1 block i: i*N .. i*N + (N-1)
-      Part 2 block i: (M + i)*N .. (M + i)*N + (N-1)
+    We define:
+      - Part 1 blocks: block indices [0..M-1], each block has N tokens
+      - Part 2 blocks: block indices [M..2*M-1], each block has N tokens
 
-    For each query index (row), we set -inf to those we cannot attend to.
+    The final 2D mask has size (2*M*N, 2*M*N). Index i => row, j => col.
 
-    We'll do it in block form for clarity.
+    The logic is:
+      1) Part1 -> Part1: block-causal. (Block i sees blocks 0..i fully)
+      2) Part1 -> Part2: no visibility (all -inf)
+      3) Part2 -> Part2: block i sees itself fully, no other block
+      4) Part2 -> Part1: block i in part2 sees blocks 0..i in part1 fully
     """
     total_seq = 2 * M * N
-    mask = torch.zeros((total_seq, total_seq), dtype=torch.float32, device=device)
+    mask = torch.full((total_seq, total_seq), float("-inf"), device=device, dtype=torch.float32)
 
-    # Helper to get the start index of block i in part 1 or part 2
-    def block_start(part, i):
-        # part: 1 or 2
-        # i: block index in [0..M-1]
-        if part == 1:
-            return i * N
-        else:  # part == 2
-            return (M + i) * N
+    # row_ids ranges [0..(total_seq-1)]^T, col_ids ranges [0..(total_seq-1)]
+    row_ids = torch.arange(total_seq, device=device).unsqueeze(-1)  # shape (total_seq, 1)
+    col_ids = torch.arange(total_seq, device=device).unsqueeze(0)   # shape (1, total_seq)
 
-    # PART 1 <-> PART 1 block-causal
-    # For block i, it can see blocks 0..i fully.
-    for i in range(M):
-        start_i = block_start(1, i)
-        end_i = start_i + N  # exclusive
-        for j in range(i+1):  # blocks 0..i
-            start_j = block_start(1, j)
-            end_j = start_j + N
-            # allow full attend
-            mask[start_i:end_i, start_j:end_j] = 0.0  # can attend
+    # Identify block indices for each row/col
+    # block_id_row = row_ids // N, block_id_col = col_ids // N
+    block_id_row = row_ids // N  # shape (total_seq, 1)
+    block_id_col = col_ids // N  # shape (1, total_seq)
 
-        # But block i cannot see block (j) > i
-        # so set them to -inf
-        for j in range(i+1, M):
-            start_j = block_start(1, j)
-            end_j = start_j + N
-            mask[start_i:end_i, start_j:end_j] = float("-inf")
+    row_is_part1 = (block_id_row < M)
+    col_is_part1 = (block_id_col < M)
 
-    # PART 2 <-> PART 2: block i can only see itself
-    for i in range(M):
-        start_i_2 = block_start(2, i)
-        end_i_2 = start_i_2 + N
-        # block i sees itself
-        mask[start_i_2:end_i_2, start_i_2:end_i_2] = 0.0
-        # other blocks => -inf
-        for j in range(M):
-            if j != i:
-                start_j_2 = block_start(2, j)
-                end_j_2 = start_j_2 + N
-                mask[start_i_2:end_i_2, start_j_2:end_j_2] = float("-inf")
+    # Prepare to set mask=0.0 in places we "can attend".
+    cond_p1p1 = row_is_part1 & col_is_part1 & (block_id_row >= block_id_col)
+    mask[cond_p1p1] = 0.0
 
-    # PART 2 -> PART 1: block i in part 2 can see blocks [0..i] in part 1
-    # so if i2 is the i-th block in part 2, then it can see blocks 0..i in part 1
-    for i in range(M):
-        start_i_2 = block_start(2, i)
-        end_i_2 = start_i_2 + N
-        for j in range(i+1):  # block 0..i in part 1
-            start_j_1 = block_start(1, j)
-            end_j_1 = start_j_1 + N
-            mask[start_i_2:end_i_2, start_j_1:end_j_1] = 0.0
+    cond_p2p2 = (~row_is_part1) & (~col_is_part1) & (block_id_row == block_id_col)
+    mask[cond_p2p2] = 0.0
 
-        # But blocks > i are not visible
-        for j in range(i+1, M):
-            start_j_1 = block_start(1, j)
-            end_j_1 = start_j_1 + N
-            mask[start_i_2:end_i_2, start_j_1:end_j_1] = float("-inf")
+    cond_p2p1 = (~row_is_part1) & col_is_part1 & (block_id_row > (block_id_col + M))
+    mask[cond_p2p1] = 0.0
 
-    # PART 1 -> PART 2: Part 1 tokens see NO Part 2 tokens
-    for i in range(M):
-        start_i_1 = block_start(1, i)
-        end_i_1 = start_i_1 + N
-        for j in range(M):
-            start_j_2 = block_start(2, j)
-            end_j_2 = start_j_2 + N
-            mask[start_i_1:end_i_1, start_j_2:end_j_2] = float("-inf")
-
-    return mask  # shape (2*M*N, 2*M*N)
+    return mask
 
 class FlowLlamaModel(nn.Module):
     def __init__(self, config: DiscreteFlowConfig, M=8, N=128):
