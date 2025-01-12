@@ -14,7 +14,7 @@ class MyConfig:
     rope_scaling = 10000
 
     # Model checkpoint for LLaMA embeddings
-    llama_checkpoint = "openlm-research/open_llama_3b"   # Example
+    llama_checkpoint = "openlm-research/open_llama_3b"
 
     # T5 checkpoint for tokenizer
     t5_tokenizer_checkpoint = "t5-base"

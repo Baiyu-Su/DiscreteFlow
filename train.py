@@ -282,6 +282,7 @@ def main():
         logging_steps=cfg.logging_steps,
         max_steps=cfg.max_steps,
         remove_unused_columns=False,
+        ddp_find_unused_parameters=False,
     )
 
     trainer = Trainer(
