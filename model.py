@@ -85,62 +85,56 @@ class SelfAttention(nn.Module):
         self.out_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
 
     def forward(self, hidden_states, rope_cos, rope_sin, attn_mask=None):
-        """
-        rope_cos, rope_sin: shape (total_seq, half_dim), already on the same device as hidden_states.
-        """
         B, S, D = hidden_states.shape
 
-        # 1) Project Q,K,V => (B, S, D)
+        # 1) Project Q,K,V
         q = self.query(hidden_states)
         k = self.key(hidden_states)
         v = self.value(hidden_states)
 
         # 2) Reshape => (B, num_heads, S, head_dim)
-        # then => (B, h, S, head_dim)
         q = q.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
 
-        # 3) Split half-dim => apply RoPE
+        # 3) Split half-dim for RoPE
         half_dim = self.head_dim // 2
-        q_rot, q_unrot = q.split(half_dim, dim=-1)  # each => (B, h, S, half_dim)
+        q_rot, q_unrot = q.split(half_dim, dim=-1)
         k_rot, k_unrot = k.split(half_dim, dim=-1)
 
-        # Transpose for rope => (B, S, h, half_dim)
-        q_rot_t = q_rot.transpose(1, 2)  # (B, S, h, half_dim)
+        q_rot_t = q_rot.transpose(1, 2)
         k_rot_t = k_rot.transpose(1, 2)
 
-        # Apply RoPE => must pass cos, sin on the same device
+        # Apply RoPE
         q_rot_roped, k_rot_roped = apply_rope(q_rot_t, k_rot_t, rope_cos, rope_sin)
 
-        # shape => (B, S, h, half_dim)
-        q_rot = q_rot_roped.transpose(1, 2)  # (B, h, S, half_dim)
+        q_rot = q_rot_roped.transpose(1, 2)
         k_rot = k_rot_roped.transpose(1, 2)
 
-        # re-cat => (B, h, S, head_dim)
         q = torch.cat([q_rot, q_unrot], dim=-1)
         k = torch.cat([k_rot, k_unrot], dim=-1)
 
-        # 4) scaled_dot_product_attention
+        # 4) Convert attn_mask=-inf => boolean mask
         if attn_mask is not None:
             bool_mask = (attn_mask == float("-inf"))
-            bool_mask = bool_mask.unsqueeze(1)  # shape (B, 1, S, S)
+            bool_mask = bool_mask.unsqueeze(1)  # (B, 1, S, S)
         else:
             bool_mask = None
 
-        # PyTorch built-in
-        attn_out, _ = F.scaled_dot_product_attention(
+        # 5) Scaled dot-product attention
+        attn_out = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=bool_mask,
             dropout_p=0.0,
             is_causal=False
         )
 
-        # 5) Reshape => (B, S, D)
+        # 6) Reshape => (B, S, D)
         attn_out = attn_out.transpose(1, 2).reshape(B, S, D)
 
-        # 6) Final projection
+        # 7) Final projection
         return self.out_proj(attn_out)
+
 
 ##########################################################
 # 4) DiscreteFlowBlock
