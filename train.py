@@ -14,7 +14,9 @@ from transformers import (
     TrainingArguments,
     Trainer
 )
+import datasets
 from datasets import load_dataset
+from loguru import logger
 
 from model import DiscreteFlowModel, DiscreteFlowConfig
 
@@ -200,7 +202,7 @@ def main():
 
     
     # 1) Build the T5 tokenizer
-    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    tokenizer = AutoTokenizer.from_pretrained("t5-base", model_max_length=args.max_length)
 
     # 2) Load the LLaMA (or open-llama) base model to extract embeddings
     base_model = AutoModel.from_pretrained(
@@ -216,16 +218,22 @@ def main():
         param.requires_grad = False
 
 
-    # TODO: Streaming and fit the length of need
     dataset = load_dataset(
-        "openwebtext",
+        "allenai/c4", 
+        "en", 
         split="train",
         streaming=True,
         cache_dir="./.hf_cache"
     )
 
     def tokenize_function(examples):
-        return tokenizer(examples["text"], truncation=True, max_length=1024, return_tensors=None)
+        return tokenizer(
+            examples["text"], 
+            truncation=True, 
+            max_length=1024, 
+            return_tensors="pt",
+            truncation=True,
+        )
 
     tokenized_dataset = dataset.map(tokenize_function, batched=False, remove_columns=["text"])
 
