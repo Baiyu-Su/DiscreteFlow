@@ -6,11 +6,11 @@ class MyConfig:
 
     # Model config
     vocab_size = 32000
-    hidden_size = 1024
-    intermediate_size = 4096
-    num_attention_heads = 16
-    num_hidden_layers = 12
-    max_sequence_length = 4096
+    hidden_size = 3200
+    intermediate_size = 3200 * 4
+    num_attention_heads = 8
+    num_hidden_layers = 6
+    max_sequence_length = 2048
     rope_scaling = 10000
 
     # Model checkpoint for LLaMA embeddings

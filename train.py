@@ -105,7 +105,7 @@ class DataCollatorFlow:
         batch_input_ids = []
         for f in features:
             # We just take input_ids
-            print(f)
+            # print(f)
             ids = f["input_ids"]
             # Truncate or pad to exactly self.context_length
             if len(ids) >= self.context_length:
@@ -113,10 +113,12 @@ class DataCollatorFlow:
             else:
                 # pad with e.g. tokenizer.pad_token_id
                 pad_len = self.context_length - len(ids)
+                # print(f"pad id{self.tokenizer.pad_token_id}.")
                 ids = ids + [self.tokenizer.pad_token_id] * pad_len
             batch_input_ids.append(ids)
 
         # Convert to tensor: (batch_size, context_length)
+        # print(f"length {len(ids)}.")
         input_ids_tensor = torch.tensor(batch_input_ids, dtype=torch.long)
 
         # Step 1: get X1 = clean token embeddings
@@ -158,7 +160,7 @@ class DataCollatorFlow:
         )  # => shape (B, M, N, embed_dim)
 
         # Flatten the (M, N) dimensions
-        part2 = part2_blocks.view(B, M*N, self.embed_dim)  # (B, M*N, embed_dim)
+        part2 = part2_blocks.view(B, self.M*self.N, self.embed_dim)  # (B, M*N, embed_dim)
 
         # 2) For PART 1, we do the same logic but with t=1 for all blocks
         #    Suppose X1_blocks_reshaped is (B, M, (N-1), embed_dim)
@@ -170,7 +172,7 @@ class DataCollatorFlow:
             dim=2
         )  # => (B, M, N, embed_dim)
 
-        part1 = part1_blocks.view(B, M*N, self.embed_dim)  # (B, M*N, embed_dim)
+        part1 = part1_blocks.view(B, self.M*self.N, self.embed_dim)  # (B, M*N, embed_dim)
 
         # 3) Finally, concat Part1 and Part2 along dimension=1
         final_input = torch.cat([part1, part2], dim=1)  # => (B, 2*M*N, embed_dim)
@@ -202,7 +204,7 @@ def main():
 
     
     # 1) Build the T5 tokenizer
-    tokenizer = AutoTokenizer.from_pretrained("t5-base", model_max_length=args.max_length)
+    tokenizer = T5Tokenizer.from_pretrained("t5-base")
 
     # 2) Load the LLaMA (or open-llama) base model to extract embeddings
     base_model = AutoModel.from_pretrained(
@@ -219,8 +221,7 @@ def main():
 
 
     dataset = load_dataset(
-        "allenai/c4", 
-        "en", 
+        "openwebtext",
         split="train",
         streaming=True,
         cache_dir="./.hf_cache"
@@ -231,13 +232,12 @@ def main():
             examples["text"], 
             truncation=True, 
             max_length=1024, 
-            return_tensors="pt",
-            truncation=True,
+            return_tensors=None,
         )
 
     tokenized_dataset = dataset.map(tokenize_function, batched=False, remove_columns=["text"])
-
-    print("Sample tokenized data:", next(iter(tokenized_dataset)))
+    # for _ in range(5):
+    #    print("Sample tokenized data:", next(iter(tokenized_dataset)))
 
     train_data = tokenized_dataset
 
@@ -273,6 +273,7 @@ def main():
         gradient_accumulation_steps=cfg.gradient_accumulation_steps,
         logging_steps=cfg.logging_steps,
         max_steps=cfg.max_steps,
+        remove_unused_columns=False,
     )
 
     trainer = Trainer(

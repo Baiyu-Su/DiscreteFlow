@@ -27,18 +27,28 @@ def rotate_half(x):
     return torch.cat([-x2, x1], dim=-1)
 
 def apply_rope(q, k, rope_cache):
+    """
+    q, k: shape (B, seq_len, num_heads, half_dim)
+    rope_cache: (cos, sin) each shape => (seq_len, half_dim)
+    """
     seq_len = q.size(1)
     cos, sin = rope_cache
+    # (seq_len, half_dim) => expand to (seq_len, 1, half_dim)
     cos = cos[:seq_len, None, :]
     sin = sin[:seq_len, None, :]
+
+    # q, k => (B, seq_len, num_heads, half_dim)
+    # rotate_half(q) => chunk each vector in half again,
+    # producing (B, seq_len, num_heads, half_dim/2) but then re-concat, so result is still half_dim.
     q_ = (q * cos) + (rotate_half(q) * sin)
     k_ = (k * cos) + (rotate_half(k) * sin)
     return q_, k_
 
-def build_rope_cache(seq_len, head_dim, base=10000, device="cpu"):
+
+def build_rope_cache(seq_len, head_dim, base=10000):
     half_dim = head_dim // 2
-    freqs = 1.0 / (base ** (torch.arange(0, half_dim, 2, device=device).float() / half_dim))
-    t = torch.arange(seq_len, device=device).float()
+    freqs = 1.0 / (base ** (torch.arange(0, half_dim, 2).float() / half_dim))
+    t = torch.arange(seq_len).float()
     freqs = torch.einsum("i,j->ij", t, freqs)  # (seq_len, half_dim//2)
 
     cos = torch.cat([freqs.cos(), freqs.cos()], dim=-1)  # (seq_len, half_dim)
@@ -74,13 +84,24 @@ class SelfAttention(nn.Module):
         k = k.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
 
-        # 3) RoPE
-        if rope_cache is not None:
-            q_t = q.transpose(1, 2)  # (B, S, h, hd)
-            k_t = k.transpose(1, 2)  # (B, S, h, hd)
-            q_t, k_t = apply_rope(q_t, k_t, rope_cache)
-            q = q_t.transpose(1, 2)
-            k = k_t.transpose(1, 2)
+        half_dim = self.head_dim // 2
+
+        q_rot, q_unrot = q.split(half_dim, dim=-1)
+        k_rot, k_unrot = k.split(half_dim, dim=-1)
+
+        # 4) Transpose to match apply_rope's expectation => (B, S, h, half_dim)
+        q_rot_t = q_rot.transpose(1, 2)
+        k_rot_t = k_rot.transpose(1, 2)
+        # apply rope
+        q_rot_roped, k_rot_roped = apply_rope(q_rot_t, k_rot_t, rope_cache)
+        # shape => (B, S, h, half_dim)
+        # transpose back => (B, h, S, half_dim)
+        q_rot = q_rot_roped.transpose(1, 2)
+        k_rot = k_rot_roped.transpose(1, 2)
+
+        # 5) Re-concat the unrot half => shape = (B, h, S, head_dim)
+        q = torch.cat([q_rot, q_unrot], dim=-1)
+        k = torch.cat([k_rot, k_unrot], dim=-1)
 
         # 4) Convert attn_mask=-inf => boolean mask for scaled_dot_product_attention
         if attn_mask is not None:
@@ -135,7 +156,7 @@ class DiscreteFlowBlock(nn.Module):
 ##########################################################
 # Vectorized build_block_causal_mask
 ##########################################################
-def build_block_causal_mask(M: int, N: int, device=torch.device("cpu")):
+def build_block_causal_mask(M: int, N: int):
     """
     Returns a mask of shape (2*M*N, 2*M*N),
     where 0 => can attend, -inf => block.
@@ -147,10 +168,10 @@ def build_block_causal_mask(M: int, N: int, device=torch.device("cpu")):
     The final 2D mask has size (2*M*N, 2*M*N).
     """
     total_seq = 2 * M * N
-    mask = torch.full((total_seq, total_seq), float("-inf"), device=device, dtype=torch.float32)
+    mask = torch.full((total_seq, total_seq), float("-inf"), dtype=torch.float32)
 
-    row_ids = torch.arange(total_seq, device=device).unsqueeze(-1)  
-    col_ids = torch.arange(total_seq, device=device).unsqueeze(0)  
+    row_ids = torch.arange(total_seq).unsqueeze(-1)  
+    col_ids = torch.arange(total_seq).unsqueeze(0)  
 
     block_id_row = row_ids // N  
     block_id_col = col_ids // N  
@@ -194,14 +215,13 @@ class DiscreteFlowModel(nn.Module):
         self.rope_cache = build_rope_cache(
             seq_len=self.total_seq,
             head_dim=(config.hidden_size // config.num_attention_heads),
-            base=config.rope_scaling,
-            device=torch.device("cpu")   # We'll store in CPU by default
+            base=config.rope_scaling,   # We'll store in CPU by default
         )
 
         # Precompute block-causal mask. Also on CPU initially.
         self.register_buffer(
             "block_causal_mask",
-            build_block_causal_mask(M, N, device=torch.device("cpu")),
+            build_block_causal_mask(M, N),
             persistent=False
         )
 
