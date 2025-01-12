@@ -177,12 +177,20 @@ class DataCollatorFlow:
         # 3) Finally, concat Part1 and Part2 along dimension=1
         final_input = torch.cat([part1, part2], dim=1)  # => (B, 2*M*N, embed_dim)
 
-        return {
-            "input_embeddings": final_input,  # shape [B, 2*(M*N), embed_dim]
-            # Return the original tokens as labels
-            "labels": input_ids_tensor,       # shape [B, context_length]
-        }
+        labels = input_ids_tensor.clone()  # Start with clean token labels
+        labels = labels.view(B, self.M, self.block_text_len)  # Reshape into blocks (B, M, N-1)
 
+        # Add -100 at time embedding positions
+        labels_with_time = torch.cat(
+            [labels, torch.full((B, self.M, 1), -100, device=labels.device, dtype=labels.dtype)],
+            dim=2
+        )  # (B, M, N)
+        labels_with_time = labels_with_time.view(B, self.M * self.N)  # Flatten into (B, M*N)
+
+        return {
+            "input_embeddings": final_input,  # (B, 2*M*N, embed_dim)
+            "labels": labels_with_time        # (B, M*N) with -100 for time tokens
+        }
 
 def main():
     # Parse arguments
