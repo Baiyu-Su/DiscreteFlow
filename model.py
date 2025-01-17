@@ -3,10 +3,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from transformers import PretrainedConfig
+
 ##########################################################
 # 1) DiscreteFlowConfig
 ##########################################################
-class DiscreteFlowConfig:
+class DiscreteFlowConfig(PretrainedConfig):
     def __init__(
         self,
         vocab_size=32000,
@@ -16,7 +18,9 @@ class DiscreteFlowConfig:
         num_hidden_layers=12,
         max_sequence_length=1024,
         rope_scaling=10000,
+        **kwargs
     ):
+        super().__init__(**kwargs)
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size

@@ -5,6 +5,7 @@ import math
 import random
 import argparse
 import importlib.util
+import wandb
 
 from transformers import (
     AutoTokenizer,
@@ -229,10 +230,12 @@ def main():
 
 
     dataset = load_dataset(
-        "openwebtext",
+        "allenai/c4",
+        "en",
         split="train",
         streaming=True,
-        cache_dir="./.hf_cache"
+        cache_dir="./.hf_cache",
+        trust_remote_code=True,
     )
 
     def tokenize_function(examples):
@@ -272,16 +275,29 @@ def main():
     # 6) Build FlowLlamaModel
     model = DiscreteFlowModel(model_config, M=cfg.M, N=cfg.N)
 
+    wandb.init(
+        project="DiscreteFlow",
+        name=cfg.run_name,
+    )
+
 
     training_args = TrainingArguments(
         output_dir=cfg.output_dir,
+        overwrite_output_dir=True,
         evaluation_strategy="no",
-        num_train_epochs=1,
+        bf16=True,
+        learning_rate=cfg.learning_rate,
+        adam_beta2=cfg.adam_beta2,
+        lr_scheduler_type=cfg.lr_scheduler_type,
+        warmup_steps=cfg.warmup_steps,
+        save_strategy="steps",
+        save_steps=cfg.save_steps,
         per_device_train_batch_size=cfg.per_device_train_batch_size,
         gradient_accumulation_steps=cfg.gradient_accumulation_steps,
         logging_steps=cfg.logging_steps,
         max_steps=cfg.max_steps,
         remove_unused_columns=False,
+        report_to="wandb"
     )
 
     trainer = Trainer(
@@ -292,6 +308,7 @@ def main():
     )
     
     trainer.train()
+    wandb.finish()
 
 
 if __name__ == '__main__':

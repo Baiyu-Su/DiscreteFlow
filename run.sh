@@ -2,10 +2,10 @@
 #SBATCH -J llama
 #SBATCH -p gh
 #SBATCH -t 48:00:00
-#SBATCH --nodes=1                # Number of nodes
+#SBATCH --nodes=8                # Number of nodes
 #SBATCH --ntasks-per-node=1
-#SBATCH -o logs/large_train_adamw.o%j  # Output file
-#SBATCH -e logs/large_train_adamw.e%j   # Error file
+#SBATCH -o logs/flow_train_adamw.o%j  # Output file
+#SBATCH -e logs/flow_train_adamw.e%j   # Error file
 
 source ~/.bashrc
 conda deactivate
@@ -26,4 +26,14 @@ export NCCL_DEBUG=INFO
 export TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor_cache_${SLURM_PROCID}
 
 # Not using distributed training for debug
-torchrun --nproc_per_node=1 train.py --config configs/config.py
+srun python -u -m torch.distributed.run \
+    --nproc_per_node=$GPUS_PER_NODE \
+    --nnodes=$SLURM_NNODES \
+    --rdzv_id=$SLURM_JOB_ID \
+    --rdzv_backend=c10d \
+    --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
+    --node_rank=$NODE_RANK \
+    --master_addr=$MASTER_ADDR \
+    --master_port=$MASTER_PORT \
+    train.py \
+    --config configs/config.py
