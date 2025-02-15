@@ -1,26 +1,48 @@
 import math
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from typing import Tuple, Optional
+
 from transformers import PretrainedConfig
 
-##########################################################
-# 1) DiscreteFlowConfig
-##########################################################
-class DiscreteFlowConfig(PretrainedConfig):
+from modules import (
+    precompute_freqs_cis,
+    apply_rotary_emb,
+    build_training_mask,
+    build_inference_mask,
+    timestep_embedding,
+    repeat_kv,
+    nucleus_cutoff,
+    embed_for_training,
+    embed_for_inference,
+    build_time_tensor,
+)
+
+
+class TokenFlowConfig(PretrainedConfig):
     def __init__(
         self,
-        vocab_size=32000,
-        hidden_size=1024,
-        intermediate_size=4096,
-        num_attention_heads=16,
-        num_hidden_layers=12,
-        max_sequence_length=1024,
-        rope_scaling=10000,
+        is_inference: bool = False,
+        M: int = 8,
+        N: int = 128,
+        vocab_size: int = 32000,
+        hidden_size: int = 1024,
+        intermediate_size: int = 4096,
+        num_attention_heads: int = 16,
+        num_hidden_layers: int = 12,
+        max_sequence_length: int = 1024,
+        rope_scaling: int = 10000,
         **kwargs
     ):
         super().__init__(**kwargs)
+        self.M = M
+        self.N = N
+        self.ctx_len = M * N
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
@@ -29,259 +51,511 @@ class DiscreteFlowConfig(PretrainedConfig):
         self.max_sequence_length = max_sequence_length
         self.rope_scaling = rope_scaling
 
-##########################################################
-# 2) RoPE Helpers
-##########################################################
-def rotate_half(x):
-    x1, x2 = x.chunk(2, dim=-1)
-    return torch.cat([-x2, x1], dim=-1)
 
-def apply_rope(q, k, cos, sin):
-    """
-    q, k: shape (B, seq_len, num_heads, half_dim)
-    cos, sin: shape (seq_len, half_dim) => on the same device as q/k
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
+        """
+        Initialize the RMSNorm normalization layer.
 
-    We do:
-       q_ = q*cos + rotate_half(q)*sin
-       k_ = k*cos + rotate_half(k)*sin
-    """
-    # q, k => (B, S, h, half_dim)
-    # cos, sin => (S, half_dim)
-    B, S, h, half_dim = q.shape
+        Args:
+            dim (int): The dimension of the input tensor.
+            eps (float, optional): A small value added to the denominator for numerical stability. Default is 1e-6.
 
-    # expand cos, sin => (S, 1, half_dim) to broadcast over B,h
-    cos = cos[:S].unsqueeze(1)  # (S, 1, half_dim)
-    sin = sin[:S].unsqueeze(1)  # (S, 1, half_dim)
+        Attributes:
+            eps (float): A small value added to the denominator for numerical stability.
+            weight (nn.Parameter): Learnable scaling parameter.
 
-    q_ = (q * cos) + (rotate_half(q) * sin)
-    k_ = (k * cos) + (rotate_half(k) * sin)
-    return q_, k_
-
-def build_rope_cache(seq_len, head_dim, base=10000):
-    """
-    We rotate half the dimension => half_dim = head_dim//2
-
-    This returns (cos, sin) each shape (seq_len, head_dim//2).
-    """
-    half_dim = head_dim // 2
-    freqs = 1.0 / (base ** (torch.arange(0, half_dim, 2).float() / half_dim))
-    t = torch.arange(seq_len).float()
-    freqs = torch.einsum("i,j->ij", t, freqs)  # shape (seq_len, half_dim//2)
-
-    cos = torch.cat([freqs.cos(), freqs.cos()], dim=-1)  # (seq_len, half_dim)
-    sin = torch.cat([freqs.sin(), freqs.sin()], dim=-1)  # (seq_len, half_dim)
-    return cos, sin
-
-##########################################################
-# 3) Self-Attention
-##########################################################
-class SelfAttention(nn.Module):
-    def __init__(self, config: DiscreteFlowConfig):
+        """
         super().__init__()
-        self.hidden_size = config.hidden_size
-        self.num_heads = config.num_attention_heads
-        self.head_dim = self.hidden_size // self.num_heads
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
 
-        self.query = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
-        self.key   = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
-        self.value = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
+    def _norm(self, x):
+        """
+        Apply the RMSNorm normalization to the input tensor.
+
+        Args:
+            x (torch.Tensor): The input tensor.
+
+        Returns:
+            torch.Tensor: The normalized tensor.
+
+        """
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        """
+        Forward pass through the RMSNorm layer.
+
+        Args:
+            x (torch.Tensor): The input tensor.
+
+        Returns:
+            torch.Tensor: The output tensor after applying RMSNorm.
+
+        """
+        output = self._norm(x.float()).type_as(x)
+        return output * self.weight
+
+
+@dataclass
+class ModulationOut:
+    shift: torch.Tensor  # shape: (B, M, dim)
+    scale: torch.Tensor  # shape: (B, M, dim)
+    gate:  torch.Tensor  # shape: (B, M, dim)
+
+    
+class Modulation(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.lin = nn.Linear(dim, 3 * dim)
+
+    def forward(self, vec: torch.Tensor) -> ModulationOut:
+        """
+        vec: (B, M, dim) — one vector per block.
+        Returns modulation parameters (shift, scale, gate) each of shape (B, M, dim)
+        """
+        out = self.lin(F.silu(vec))  # (B, M, 3*dim)
+        shift, scale, gate = out.chunk(3, dim=-1)  # each (B, M, dim)
+        return ModulationOut(shift=shift, scale=scale, gate=gate)
+
+
+class MLPEmbedder(nn.Module):
+    def __init__(self, in_dim: int, hidden_dim: int):
+        super().__init__()
+        self.in_layer = nn.Linear(in_dim, hidden_dim, bias=True)
+        self.silu = nn.SiLU()
+        self.out_layer = nn.Linear(hidden_dim, hidden_dim, bias=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.out_layer(self.silu(self.in_layer(x)))
+    
+    
+class Attention(nn.Module):
+    """Multi-head attention module."""
+    def __init__(self, config: TokenFlowConfig):
+        """
+        Initialize the Attention module.
+
+        Args:
+            config (TokenFlowConfig): Model configuration parameters.
+
+        Attributes:
+            n_kv_heads (int): Number of key and value heads.
+            n_rep (int): Number of repetitions for kv heads.
+            head_dim (int): Dimension size of each attention head.
+            wq (nn.Linear): Linear transformation for queries.
+            wk (nn.Linear): Linear transformation for keys.
+            wv (nn.Linear): Linear transformation for values.
+            wo (nn.Linear): Linear transformation for output.
+            is_inference (bool): Flag for inference mode.
+            cache_k (torch.Tensor): Cached keys for attention.
+            cache_v (torch.Tensor): Cached values for attention.
+
+        """
+        super().__init__()
+        self.n_kv_heads = config.n_heads if config.n_kv_heads is None else config.n_kv_heads
+        self.n_heads = config.n_heads
+        self.n_rep = self.n_heads // self.n_kv_heads
+        self.head_dim = config.dim // config.n_heads
+        self.N = config.N
+
+        self.wq = nn.Linear(
+            config.dim,
+            config.n_heads * self.head_dim,
+            bias=False,
+        )
+        self.wk = nn.Linear(
+            config.dim,
+            self.n_kv_heads * self.head_dim,
+            bias=False,
+        )
+        self.wv = nn.Linear(
+            config.dim,
+            self.n_kv_heads * self.head_dim,
+            bias=False,
+        )
+        self.wo = nn.Linear(
+            config.n_heads * self.head_dim,
+            config.dim,
+            bias=False,
+        )
         
-        self.out_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
-
-    def forward(self, hidden_states, rope_cos, rope_sin, attn_mask=None):
-        B, S, D = hidden_states.shape
-
-        # 1) Project Q,K,V
-        q = self.query(hidden_states)
-        k = self.key(hidden_states)
-        v = self.value(hidden_states)
-
-        # 2) Reshape => (B, num_heads, S, head_dim)
-        q = q.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
-        v = v.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
-
-        # 3) Split half-dim for RoPE
-        half_dim = self.head_dim // 2
-        q_rot, q_unrot = q.split(half_dim, dim=-1)
-        k_rot, k_unrot = k.split(half_dim, dim=-1)
-
-        q_rot_t = q_rot.transpose(1, 2)
-        k_rot_t = k_rot.transpose(1, 2)
-
-        # Apply RoPE
-        q_rot_roped, k_rot_roped = apply_rope(q_rot_t, k_rot_t, rope_cos, rope_sin)
-
-        q_rot = q_rot_roped.transpose(1, 2)
-        k_rot = k_rot_roped.transpose(1, 2)
-
-        q = torch.cat([q_rot, q_unrot], dim=-1)
-        k = torch.cat([k_rot, k_unrot], dim=-1)
-
-        # 4) Convert attn_mask=-inf => boolean mask
-        if attn_mask is not None:
-            bool_mask = (attn_mask == float("-inf"))
-            bool_mask = bool_mask.unsqueeze(1)  # (B, 1, S, S)
+        self.is_inference = config.is_inference
+        if self.is_inference:
+            self.cache_k = torch.zeros(
+                (
+                    config.max_batch_size,
+                    config.max_seq_len,
+                    self.n_kv_heads,
+                    self.head_dim,
+                ),
+                device="cuda",
+            )
+            self.cache_v = torch.zeros(
+                (
+                    config.max_batch_size,
+                    config.max_seq_len,
+                    self.n_kv_heads,
+                    self.head_dim,
+                ),
+                device="cuda",
+            )
         else:
-            bool_mask = None
+            self.cache_k = None
+            self.cache_v = None
 
-        # 5) Scaled dot-product attention
-        attn_out = F.scaled_dot_product_attention(
-            q, k, v,
-            attn_mask=bool_mask,
-            dropout_p=0.0,
-            is_causal=False
-        )
+    def forward(
+        self,
+        x: torch.Tensor,
+        start_pos: int,
+        freqs_cis: torch.Tensor,
+        mask: torch.Tensor,
+    ):
+        """
+        Forward pass of the attention module.
 
-        # 6) Reshape => (B, S, D)
-        attn_out = attn_out.transpose(1, 2).reshape(B, S, D)
+        Args:
+            x (torch.Tensor): Input tensor.
+            start_pos (int): Starting position for caching.
+            freqs_cis (torch.Tensor): Precomputed frequency tensor.
+            mask (torch.Tensor): Attention mask tensor.
 
-        # 7) Final projection
-        return self.out_proj(attn_out)
+        Returns:
+            torch.Tensor: Output tensor after attention.
+
+        """
+        B, seq_len, _ = x.shape
+        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+
+        xq = xq.view(B, seq_len, self.n_heads, self.head_dim)
+        xk = xk.view(B, seq_len, self.n_kv_heads, self.head_dim)
+        xv = xv.view(B, seq_len, self.n_kv_heads, self.head_dim)
+
+        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+
+        if self.is_inference:
+            self.cache_k = self.cache_k.to(xq)
+            self.cache_v = self.cache_v.to(xq)
+
+            self.cache_k[:B, start_pos : start_pos + seq_len - self.N] = xk
+            self.cache_v[:B, start_pos : start_pos + seq_len - self.N] = xv
+
+            keys = self.cache_k[:B, : start_pos + seq_len]
+            values = self.cache_v[:B, : start_pos + seq_len]
+        else:
+            del start_pos
+            keys = xk
+            values = xv
+
+        # repeat k/v heads if n_kv_heads < n_heads
+        keys = repeat_kv(keys, self.n_rep)  # (bs, cache_len + seq_len, n_heads, head_dim)
+        values = repeat_kv(values, self.n_rep)  # (bs, cache_len + seq_len, n_heads, head_dim)
+
+        xq = xq.transpose(1, 2)  # (bs, n_heads, seq_len, head_dim)
+        keys = keys.transpose(1, 2) # (bs, n_heads, cache_len + seq_len, head_dim)
+        values = values.transpose(1, 2) # (bs, n_heads, cache_len + seq_len, head_dim)
+        scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+        if mask is not None:
+            scores = scores + mask  # (bs, n_heads, seq_len, cache_len + seq_len)
+        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+        output = torch.matmul(scores, values)  # (bs, n_heads, seq_len, head_dim)
+        output = output.transpose(1, 2).contiguous().view(B, seq_len, -1)
+        return self.wo(output)
 
 
-##########################################################
-# 4) DiscreteFlowBlock
-##########################################################
-class DiscreteFlowBlock(nn.Module):
-    def __init__(self, config: DiscreteFlowConfig):
+class FeedForward(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        hidden_dim: int,
+        multiple_of: int,
+    ):
+        """
+        Initialize the FeedForward module.
+
+        Args:
+            dim (int): Input dimension.
+            hidden_dim (int): Hidden dimension of the feedforward layer.
+            multiple_of (int): Value to ensure hidden dimension is a multiple of this value.
+
+        Attributes:
+            w1 (nn.Linear): Linear transformation for the first layer.
+            w2 (RowParallelLinear): Linear transformation for the second layer.
+            w3 (nn.Linear): Linear transformation for the third layer.
+
+        """
         super().__init__()
-        self.hidden_size = config.hidden_size
-        self.self_attn = SelfAttention(config)
+        hidden_dim = int(2 * hidden_dim / 3)
 
-        self.input_layernorm = nn.LayerNorm(config.hidden_size, elementwise_affine=True)
-        self.post_attn_layernorm = nn.LayerNorm(config.hidden_size, elementwise_affine=True)
+        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        self.mlp = nn.Sequential(
-            nn.Linear(config.hidden_size, config.intermediate_size, bias=False),
-            nn.GELU(),
-            nn.Linear(config.intermediate_size, config.hidden_size, bias=False),
+        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
+        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
+
+    def forward(self, x):
+        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+
+
+class TokenFlowBlock(nn.Module):
+    def __init__(self, layer_id: int, config: TokenFlowConfig):
+        """
+        Initialize a TokenFlowBlock.
+
+        Args:
+            layer_id (int): Identifier for the layer.
+            config (TokenFlowConfig): Model configuration parameters.
+
+        Attributes:
+            n_heads (int): Number of attention heads.
+            dim (int): Dimension size of the model.
+            head_dim (int): Dimension size of each attention head.
+            attention (Attention): Attention module.
+            feed_forward (FeedForward): FeedForward module.
+            layer_id (int): Identifier for the layer.
+            attention_norm (RMSNorm): Layer normalization for attention output.
+            ffn_norm (RMSNorm): Layer normalization for feedforward output.
+        """
+        super().__init__()
+        self.n_heads = config.n_heads
+        self.dim = config.dim
+        self.head_dim = config.dim // config.n_heads
+        self.N = config.N
+        self.attention = Attention(config)
+        self.feed_forward = FeedForward(
+            dim=config.dim,
+            hidden_dim=4*config.dim,
+            multiple_of=config.multiple_of,
         )
+        self.layer_id = layer_id
+        self.attention_norm = RMSNorm(config.dim, eps=config.norm_eps)
+        self.ffn_norm = RMSNorm(config.dim, eps=config.norm_eps)
+        self.modulation = Modulation(config.dim)
 
-    def forward(self, hidden_states, rope_cos, rope_sin, attn_mask=None):
-        # LN -> Self-Attn -> Residual
-        hs_ln = self.input_layernorm(hidden_states)
-        attn_out = self.self_attn(hs_ln, rope_cos, rope_sin, attn_mask=attn_mask)
-        hidden_states = hidden_states + attn_out
+    def forward(
+        self,
+        x: torch.Tensor,
+        vec: torch.Tensor,
+        start_pos: int,
+        freqs_cis: torch.Tensor,
+        mask: torch.Tensor,
+    ):
+        """
+        Perform a forward pass through the TransformerBlock.
 
-        # LN -> MLP -> Residual
-        hs_ln2 = self.post_attn_layernorm(hidden_states)
-        ff_out = self.mlp(hs_ln2)
-        hidden_states = hidden_states + ff_out
+        Args:
+            x (torch.Tensor): Input tensor.
+            vec (torch.Tensor): Time modulation tensor.
+            start_pos (int): Starting position for attention caching.
+            freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
+            mask (torch.Tensor, optional): Masking tensor for attention. Defaults to None.
 
-        return hidden_states
+        Returns:
+            torch.Tensor: Output tensor after applying attention and feedforward layers.
+        """
+        mod = self.modulation(vec)  # mod.shift, mod.scale, mod.gate (B, 2*M, dim)
 
-##########################################################
-# 5) build_block_causal_mask
-##########################################################
-def build_block_causal_mask(M: int, N: int):
-    """
-    Returns a mask of shape (2*M*N, 2*M*N),
-    where 0 => can attend, -inf => block.
-    """
-    total_seq = 2 * M * N
-    mask = torch.full((total_seq, total_seq), float("-inf"), dtype=torch.float32)
+        mod_shift = mod.shift.repeat_interleave(self.N, dim=1)  # (B, ctx, dim)
+        mod_scale = mod.scale.repeat_interleave(self.N, dim=1)  # (B, ctx, dim)
+        mod_gate  = mod.gate.repeat_interleave(self.N, dim=1)   # (B, ctx, dim)
 
-    row_ids = torch.arange(total_seq).unsqueeze(-1)
-    col_ids = torch.arange(total_seq).unsqueeze(0)
+        x_mod = (1 + mod_scale) * self.attention_norm(x) + mod_shift
+        h = x + self.attention(x_mod, start_pos, freqs_cis, mask)
+        out = h + mod_gate * self.feed_forward(self.ffn_norm(h))
 
-    block_id_row = row_ids // N
-    block_id_col = col_ids // N
+        return out
 
-    row_is_part1 = (block_id_row < M)
-    col_is_part1 = (block_id_col < M)
 
-    # Part1->Part1
-    cond_p1p1 = row_is_part1 & col_is_part1 & (block_id_row >= block_id_col)
-    mask[cond_p1p1] = 0.0
+class TokenFlowModel(nn.Module):
+    def __init__(self, config: TokenFlowConfig):
+        """
+        Initialize a Token Flow Model.
 
-    # Part2->Part2
-    cond_p2p2 = (~row_is_part1) & (~col_is_part1) & (block_id_row == block_id_col)
-    mask[cond_p2p2] = 0.0
+        Args:
+            config (TokenFlowConfig): Model configuration parameters.
 
-    # Part2->Part1
-    cond_p2p1 = (~row_is_part1) & col_is_part1 & (block_id_row >= (block_id_col + M))
-    mask[cond_p2p1] = 0.0
+        Attributes:
+            config (TokenFlowConfig): Model configuration parameters.
+            vocab_size (int): Vocabulary size.
+            n_layers (int): Number of layers in the model.
+            tok_embeddings (ParallelEmbedding): Token embeddings.
+            layers (torch.nn.ModuleList): List of Transformer blocks.
+            norm (RMSNorm): Layer normalization for the model output.
+            output (ColumnParallelLinear): Linear layer for final output.
+            freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
 
-    return mask
-
-##########################################################
-# 6) DiscreteFlowModel
-##########################################################
-class DiscreteFlowModel(nn.Module):
-    def __init__(self, config: DiscreteFlowConfig, M=8, N=128):
+        """
         super().__init__()
         self.config = config
-        self.M = M
-        self.N = N
-        self.total_seq = 2 * M * N
+        self.n_layers = config.n_layers
+        self.M = config.M
+        self.N = config.N
+        
+        self.is_inference = config.is_inference
+        self.token_embed = pretrained_token_embedding
+        self.time_embed = MLPEmbedder(in_dim=256, hidden_dim=config.dim)
 
-        self.layers = nn.ModuleList(
-            [DiscreteFlowBlock(config) for _ in range(config.num_hidden_layers)]
+        self.mask = None if self.is_inference else build_training_mask(config.M, config.N)
+
+        self.layers = torch.nn.ModuleList()
+        for layer_id in range(config.n_layers):
+            self.layers.append(TokenFlowBlock(layer_id, config))
+
+        self.final_layer_norm = RMSNorm(config.dim, eps=config.norm_eps)
+        self.output_proj = nn.Linear(config.dim, config.vocab_size, bias=False)
+
+        self.freqs_cis = precompute_freqs_cis(
+            self.config.dim // self.config.n_heads, self.config.max_seq_len
         )
-        self.final_layer_norm = nn.LayerNorm(config.hidden_size, elementwise_affine=True)
-        self.output_proj = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
-        # 1) Precompute RoPE on CPU, then store as buffers
-        cos, sin = build_rope_cache(
-            seq_len=self.total_seq,
-            head_dim=(config.hidden_size // config.num_attention_heads),
-            base=config.rope_scaling,
-        )
-        # Register them as buffers so they move with model.to(device)
-        self.register_buffer("rope_cos", cos, persistent=False)
-        self.register_buffer("rope_sin", sin, persistent=False)
 
-        # 2) Build block-causal mask => also store as buffer
-        mask = build_block_causal_mask(M, N)
-        self.register_buffer("block_causal_mask", mask, persistent=False)
+    def forward(self, tokens_or_embeds: torch.Tensor, labels: Optional[torch.Tensor] = None, start_pos: Optional[int] = None, time: Optional[torch.Tensor] = None):
+        if self.is_inference:
+            return self.inference_forward(tokens_or_embeds, start_pos, time)
+        else:
+            return self.training_forward(tokens_or_embeds, labels)
+        
 
-    def forward(self, input_embeddings: torch.Tensor, labels: torch.Tensor = None):
-        """
-        input_embeddings: shape (B, 2*M*N, hidden_size)
-        labels: shape (B, M*N) => IDs for part1
-        """
-        B, seq_len, hidden_dim = input_embeddings.shape
-        assert seq_len == self.total_seq, f"Expected seq_len={self.total_seq}, got {seq_len}"
+    def training_forward(self, tokens: torch.Tensor, labels: torch.Tensor):
+        B, seq_len = tokens.shape
+        assert seq_len % self.N == 0, f"Sequence length {seq_len} is not a multiple of block size {self.N}"
+        assert labels is not None, "Training mode requires labels."
+        
+        start_pos = 0
+        self.freqs_cis = self.freqs_cis.to(tokens.device)
+        h, t_vec = embed_for_training(tokens, self.token_embed, self.time_embed, self.M, self.N)
+        
+        freqs_cis = self.freqs_cis.repeat(2, 1)
+        mask = self.mask
 
-        # 1) Expand attn_mask => (B, seq_len, seq_len) on correct device
-        attn_mask = self.block_causal_mask  # already a buffer
-        attn_mask = attn_mask.unsqueeze(0).expand(B, seq_len, seq_len).to(input_embeddings.device)
-
-        # 2) Also ensure rope_cos, rope_sin are on the same device
-        rope_cos = self.rope_cos.to(input_embeddings.device)
-        rope_sin = self.rope_sin.to(input_embeddings.device)
-
-        hidden_states = input_embeddings
-
-        # 3) Pass through each block
         for layer in self.layers:
-            hidden_states = layer(
-                hidden_states,
-                rope_cos=rope_cos,
-                rope_sin=rope_sin,
-                attn_mask=attn_mask
+            h = layer(h, t_vec, start_pos, freqs_cis, mask)
+
+        B_, seqlen_ = labels.shape
+        assert B_ == B and seqlen_ == seq_len, f"Labels must be shape (B, M*N). Got {labels.shape}"
+        
+        h = h[:, self.M * self.N :, :]
+        h = self.final_layer_norm(h)
+        logits = self.output_proj(h)
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
+        
+        return {"logits": logits.float(), "loss": loss}
+    
+
+    def inference_forward(self, h: torch.Tensor, start_pos: int, time: float):
+        B, seq_len, _ = h.shape
+        assert seq_len % self.N == 0, f"Sequence length {seq_len} is not a multiple of block size {self.N}"
+        assert start_pos is not None, "Inference mode requires start_pos."
+        assert time is not None, "Inference mode requires time."
+        
+        self.freqs_cis = self.freqs_cis.to(h.device)
+        time = build_time_tensor(time, seq_len, B, self.N)
+        t_vec = self.time_embed(time)
+        
+        freqs_cis = self.freqs_cis[start_pos : start_pos + seq_len]
+        mask = build_inference_mask(seq_len, self.N, start_pos).to(h.device)
+
+        for layer in self.layers:
+            h = layer(h, t_vec, start_pos, freqs_cis, mask)
+
+        h = self.final_layer_norm(h)
+        logits = self.output_proj(h)
+        
+        return {"logits": logits}
+    
+    
+    @torch.inference_mode()
+    def generate(
+        self,
+        prompt_tokens: List[List[int]],
+        time_schedule: List[float],
+        top_p: float = 1.0,
+        echo: bool = False,
+        pad_id: int = 0,
+        eos_id: int = 1,
+    ) -> Tuple[List[List[int]]]:
+        """
+        Generate text sequences based on provided prompts using the language generation model.
+
+        Args:
+            prompt_tokens (List[List[int]]): List of tokenized prompts, where each prompt is represented as a list of integers.
+            time_schedule (List[float]): List of time steps for the generation process. Must start with 0 and end with 1.
+            top_p (float, optional): Top-p probability threshold for nucleus sampling. Defaults to 1.0 (switched off).
+            echo (bool, optional): Flag indicating whether to include prompt tokens in the generated output. Defaults to False.
+        Returns:
+            Tuple[List[List[int]]: A tuple containing generated token sequences.
+
+        Note:
+            This method uses the provided prompts as a basis for generating text. It employs nucleus sampling to produce text with controlled randomness.
+        """
+        config = self.config
+        B = len(prompt_tokens)
+        assert B <= config.max_batch_size, (B, config.max_batch_size)
+        assert all(0 <= x <= 1 for x in time_schedule), "Time steps must between 0 and 1"
+
+        
+        max_prompt_len = max(len(t) for t in prompt_tokens)
+        assert max_prompt_len <= config.ctx_len
+        total_len = config.ctx_len
+
+        tokens = torch.full((B, total_len), pad_id, dtype=torch.long, device="cuda")
+        for k, prompt in enumerate(prompt_tokens):
+            prompt_len = len(prompt)
+            extra_pad = (-prompt_len) % self.N  # This is 0 if prompt_len is already a multiple of N.
+            new_prompt = [pad_id] * extra_pad + prompt # prepad prompt tokens on the left to be multiples of N
+            tokens[k, :len(new_prompt)] = torch.tensor(new_prompt, dtype=torch.long, device="cuda") # Replace tokens tensor with prompt tokens
+            
+        min_prompt_len = min(len(t) for t in prompt_tokens)
+
+        prev_pos = 0
+        eos_reached = torch.tensor([False] * B, device="cuda")
+        input_text_mask = tokens != pad_id
+
+        for cur_pos in range(min_prompt_len, total_len, self.N):
+            Xt = embed_for_inference(tokens[:, prev_pos:cur_pos], self.token_embed, self.N)
+
+            for time, next_time in zip(time_schedule[:-1], time_schedule[1:]):
+                logits = self.forward(Xt, prev_pos, time)["logits"]
+                if time == 0.:
+                    prev_pos = cur_pos
+                    Xt = Xt[:, prev_pos:cur_pos+self.N]
+                
+                probs = torch.softmax(logits[:, -self.N:], dim=-1)
+                probs = nucleus_cutoff(probs, top_p) if top_p < 1 else probs
+
+                E = self.token_embed.weight
+                X1t = torch.matmul(probs, E) # \Hat{X1} estimation at time t is exptectation of embedding vectors
+                alpha = (next_time - time) / (1 - time) # t_{i+1} - t_i / 1 - t_i
+                Xt.lerp_(X1t, alpha)
+                
+            # Sample next block of tokens deterministically according to model logits of X1
+            X1_logits = self.forward(Xt, prev_pos, 1.)["logits"]
+            next_tokens = torch.argmax(X1_logits[:, -self.N:], dim=-1)
+
+            # only replace token if prompt has already been generated
+            next_tokens = torch.where(
+                input_text_mask[:, cur_pos:cur_pos+self.N], tokens[:, cur_pos:cur_pos+self.N], next_tokens
             )
+            tokens[:, cur_pos:cur_pos+self.N] = next_tokens
 
-        # 4) Final LN
-        hidden_states = self.final_layer_norm(hidden_states)  # (B, 2*M*N, hidden_size)
+            # Update the eos_reached flag for each sequence.
+            eos_in_block = (
+                (~input_text_mask[:, cur_pos:cur_pos+self.N]) & (next_tokens == eos_id)
+            ).any(dim=1)
+            eos_reached |= eos_in_block
+            
+            if all(eos_reached):
+                break
 
-        # 5) Slice out Part2 => shape (B, M*N, hidden_dim)
-        part2_states = hidden_states[:, self.M * self.N :, :]
-
-        # 6) Project => (B, M*N, vocab_size)
-        logits_part2 = self.output_proj(part2_states)
-
-        # 7) Loss
-        loss = None
-        if labels is not None:
-            B_, length_ = labels.shape
-            assert B_ == B and length_ == (self.M * self.N), \
-                f"Labels must be shape (B, M*N). Got {labels.shape}"
-
-            logits_2d = logits_part2.reshape(B * self.M * self.N, -1)
-            labels_1d = labels.reshape(B * self.M * self.N)
-
-            loss = F.cross_entropy(logits_2d, labels_1d)
-
-        return {"loss": loss, "logits": logits_part2}
+        out_tokens = []
+        for i, toks in enumerate(tokens.tolist()):
+            # cut to max gen len
+            start = 0 if echo else len(prompt_tokens[i])
+            toks = toks[start : len(prompt_tokens[i]) + max_gen_len]
+            # cut to eos tok if any
+            if eos_id in toks:
+                eos_idx = toks.index(eos_id)
+                toks = toks[:eos_idx]
+            out_tokens.append(toks)
+        return out_tokens
