@@ -531,18 +531,16 @@ class TokenFlowModel(nn.Module):
             This method uses the provided prompts as a basis for generating text. It employs nucleus sampling to produce text with controlled randomness.
         """
         B = len(prompt_tokens)
-        assert B <= self.max_B, f"Batch size {B} exceeds maximum batch size {self.max_B}"
-        assert all(
-            0 <= x <= 1 for x in time_schedule), "Time steps must between 0 and 1"
-        assert time_schedule[0] == 0 and time_schedule[-1] == 1, "Time schedule must start with 0 and end with 1"
+        assert B <= self.max_B, f"Batch size {B} exceeds maximum batch size {self.max_B}."
+        assert all(0 <= x <= 1 for x in time_schedule), "Time steps must between 0 and 1."
+        assert time_schedule[0] == 0 and time_schedule[-1] == 1, "Time schedule must start with 0 and end with 1."
 
         max_prompt_len = max(len(t) for t in prompt_tokens)
         ctx_len = self.M * self.N
-        assert max_prompt_len <= ctx_len
+        assert max_prompt_len <= ctx_len, f"Prompt length {max_prompt_len} exceeds context length {ctx_len}."
         total_len = ctx_len
 
-        tokens = torch.full((B, total_len), pad_id,
-                            dtype=torch.long, device="cuda")
+        tokens = torch.full((B, total_len), pad_id, dtype=torch.long, device="cuda")
         for k, prompt in enumerate(prompt_tokens):
             prompt_len = len(prompt)
             # This is 0 if prompt_len is already a multiple of N.
@@ -550,8 +548,7 @@ class TokenFlowModel(nn.Module):
             # prepad prompt tokens on the left to be multiples of N
             new_prompt = [pad_id] * extra_pad + prompt
             # Replace tokens tensor with prompt tokens
-            tokens[k, :len(new_prompt)] = torch.tensor(
-                new_prompt, dtype=torch.long, device="cuda")
+            tokens[k, :len(new_prompt)] = torch.tensor(new_prompt, dtype=torch.long, device="cuda")
 
         min_prompt_len = min(len(t) for t in prompt_tokens)
 
@@ -560,12 +557,11 @@ class TokenFlowModel(nn.Module):
         input_text_mask = tokens != pad_id
 
         for cur_pos in range(min_prompt_len, total_len, self.N):
-            Xt = embed_for_inference(
-                tokens[:, prev_pos:cur_pos], self.token_embed, self.N)
+            Xt = embed_for_inference(tokens[:, prev_pos:cur_pos], self.token_embed, self.N)
 
-            for time, next_time in zip(time_schedule[:-1], time_schedule[1:]):
+            for i, (time, next_time) in enumerate(zip(time_schedule[:-1], time_schedule[1:])):
                 logits = self.forward(Xt, prev_pos, time)["logits"]
-                if time == 0.:
+                if i == 0:
                     prev_pos = cur_pos
                     Xt = Xt[:, prev_pos:cur_pos+self.N]
 
@@ -573,10 +569,8 @@ class TokenFlowModel(nn.Module):
                 probs = nucleus_cutoff(probs, top_p) if top_p < 1 else probs
 
                 E = self.token_embed.weight
-                # \Hat{X1} estimation at time t is exptectation of embedding vectors
-                X1t = torch.matmul(probs, E)
-                # t_{i+1} - t_i / 1 - t_i
-                alpha = (next_time - time) / (1 - time)
+                X1t = torch.matmul(probs, E) # \Hat{X1} estimation at time t is exptectation of embedding vectors
+                alpha = (next_time - time) / (1 - time) # (t_{i+1} - t_i) / (1 - t_i)
                 Xt.lerp_(X1t, alpha)
 
             # Sample next block of tokens deterministically according to model logits of X1
@@ -584,10 +578,7 @@ class TokenFlowModel(nn.Module):
             next_tokens = torch.argmax(X1_logits[:, -self.N:], dim=-1)
 
             # only replace token if prompt has already been generated
-            next_tokens = torch.where(
-                input_text_mask[:, cur_pos:cur_pos+self.N], tokens[:,
-                                                                   cur_pos:cur_pos+self.N], next_tokens
-            )
+            next_tokens = torch.where(input_text_mask[:, cur_pos:cur_pos+self.N], tokens[:,cur_pos:cur_pos+self.N], next_tokens)
             tokens[:, cur_pos:cur_pos+self.N] = next_tokens
 
             # Update the eos_reached flag for each sequence.

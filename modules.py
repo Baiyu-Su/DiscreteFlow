@@ -85,24 +85,26 @@ def apply_rotary_emb(
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
-def timestep_embedding(t: torch.Tensor, dim, max_period=10000, time_factor: float = 1000.0):
+def timestep_embedding(t: torch.Tensor, time_dim: int, max_period: int = 10000, time_factor: float = 1000.0):
     """
     Create sinusoidal timestep embeddings.
-    :param t: a 1-D Tensor of N indices, one per batch element.
-                      These may be fractional.
-    :param dim: the dimension of the output.
-    :param max_period: controls the minimum frequency of the embeddings.
-    :return: an (N, D) Tensor of positional embeddings.
+    Args:
+        t (torch.Tensor): Tensor of shape (B, 1) containing time values.
+        time_dim (int): Dimension of the time embedding.
+        max_period (int, optional): Maximum period for the sinusoidal functions. Defaults to 10000.
+        time_factor (float, optional): Scaling factor for time values. Defaults to 1000.0.
+    Returns:
+        torch.Tensor: Sinusoidal timestep embeddings of shape (B, time_dim).
     """
     t = time_factor * t
-    half = dim // 2
+    half = time_dim // 2
     freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half).to(
         t.device
     )
 
     args = t[:, None].float() * freqs[None]
     embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-    if dim % 2:
+    if time_dim % 2:
         embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
     if torch.is_floating_point(t):
         embedding = embedding.to(t)
@@ -153,7 +155,7 @@ def build_training_mask(M: int, N: int):
     return mask
 
 
-def build_inference_mask(start_pos: int, seqlen: int, N: int, device=None) -> torch.Tensor:
+def build_inference_mask(start_pos: int, seq_len: int, N: int, device=None) -> torch.Tensor:
     """
     Build a block causal mask for inference.
     
@@ -166,11 +168,11 @@ def build_inference_mask(start_pos: int, seqlen: int, N: int, device=None) -> to
           with global index < (start_pos//N + i + 1).
     
     The final mask is built at the block level (shape: (num_current_blocks, total_blocks))
-    and then expanded so that each scalar becomes an N×N sub-matrix.
+    and then expanded so that each scalar becomes an N*N sub-matrix.
     
     Args:
         start_pos (int): Number of cached tokens (a multiple of N).
-        seqlen (int): Number of current tokens (a multiple of N).
+        seq_len (int): Number of current tokens (a multiple of N).
         N (int): Block size.
         device: The torch device to allocate the mask.
         
@@ -182,7 +184,7 @@ def build_inference_mask(start_pos: int, seqlen: int, N: int, device=None) -> to
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     num_cached_blocks = start_pos // N
-    num_current_blocks = seqlen // N
+    num_current_blocks = seq_len // N
     total_blocks = num_cached_blocks + num_current_blocks
 
     block_indices = torch.arange(total_blocks, device=device).unsqueeze(0)  # (1, total_blocks)
@@ -222,10 +224,22 @@ def nucleus_cutoff(probs: torch.Tensor, p: float) -> torch.Tensor:
     return probs_new
 
 
-def embed_for_training(input_ids: torch.Tensor, token_embed: nn.Module, time_embed: nn.Module, M: int, N: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    with torch.no_grad():
-        X1 = token_embed(input_ids) #  (B, M*N, dim)
-
+def embed_for_training(input_ids: torch.Tensor, token_embed: nn.Module, time_embed: nn.Module, M: int, N: int, time_dim: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Embeds clean input tokens and appends random noise embeddings.
+    Args:
+        input_ids (torch.Tensor): Tensor of shape (B, seq_len) containing token indices.
+        token_embed (nn.Module): Embedding module (nn.Embedding) that converts token indices to embeddings.
+        time_embed (nn.Module): Embedding module for time embeddings.
+        M (int): Number of blocks in the sequence.
+        N (int): Generation block size.
+        time_dim (int): Dimension of the time embedding.
+    Returns:    
+        Tuple[torch.Tensor, torch.Tensor]: Tuple containing:
+            - X_all (torch.Tensor): Concatenated tensor of shape (B, 2*M*N, dim) where dim is model dimension.
+            - t_vec (torch.Tensor): Time embeddings of shape (B, 2*M, time_dim).
+    """
+    X1 = token_embed(input_ids)  # (B, M*N, dim)
     B = X1.shape[0]
     t_sample = torch.rand((B, M)) # (B, M)
     t_full = t_sample.repeat_interleave(N, dim=1).unsqueeze(-1) # (B, M*N, 1)
@@ -235,7 +249,7 @@ def embed_for_training(input_ids: torch.Tensor, token_embed: nn.Module, time_emb
     X_all = torch.cat([X1, Xt], dim=1)  # (B, 2*M*N, dim)
     t1 = torch.ones_like(t_sample)  # (B, M)
     t_all = torch.cat([t1, t_sample], dim=1)  # (B, 2*M)
-    t_vec = time_embed(timestep_embedding(t_all, 256))  # (B, 2*M, dim)
+    t_vec = time_embed(timestep_embedding(t_all, time_dim))  # (B, 2*M, dim)
 
     return X_all, t_vec
 
@@ -243,22 +257,18 @@ def embed_for_training(input_ids: torch.Tensor, token_embed: nn.Module, time_emb
 def embed_for_inference(input_ids: torch.Tensor, token_embed: nn.Module, N: int) -> torch.Tensor:
     """
     Embeds clean input tokens and appends random noise embeddings.
-
     Args:
         input_ids (torch.Tensor): Tensor of shape (B, seq_len) containing token indices.
         token_embed (nn.Module): Embedding module (e.g., nn.Embedding) that converts token indices to embeddings.
         N (int): Generation block size.
-
     Returns:
         torch.Tensor: Concatenated tensor of shape (B, seq_len+N, dim) where dim is the embedding dimension.
     """
-    # Embed the input tokens: shape (B, seqlen, dim)
-    embedded_tokens = token_embed(input_ids)
+    embedded_tokens = token_embed(input_ids) #(B, seqlen, dim)
     B, _, dim = embedded_tokens.shape
 
     X0 = torch.randn(B, N, dim, device="cuda")
-    # Concatenate along the sequence dimension (dim=1) to get (B, seqlen+N, dim)
-    combined_embeddings = torch.cat((embedded_tokens, X0), dim=1)
+    combined_embeddings = torch.cat((embedded_tokens, X0), dim=1) # (B, seqlen+N, dim)
 
     return combined_embeddings
 
