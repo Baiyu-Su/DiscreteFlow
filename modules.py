@@ -1,12 +1,8 @@
 import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from typing import Tuple, Optional
-
-from transformers import PretrainedConfig
-
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     """

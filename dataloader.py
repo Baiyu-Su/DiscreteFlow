@@ -21,7 +21,7 @@ class DataCollatorFlow:
         """
         batch_input_ids = []
         batch_labels = []
-
+        
         for f in features:
             # Retrieve the original token ids for this example.
             ids = f["input_ids"]

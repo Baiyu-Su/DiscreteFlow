@@ -24,17 +24,17 @@ from modules import (
 
 @dataclass
 class TokenFlowConfig:
-    is_inference: bool = False,
-    M: int = 8,
-    N: int = 128,
-    max_B: int = 32,
-    vocab_size: int = 32000,
-    dim: int = 1024,
-    time_dim: int = 256,
-    n_heads: int = 16,
-    n_kv_heads: Optional[int] = None,
-    n_layers: int = 12,
-    rope_scaling: int = 10000,
+    is_inference: bool = False
+    M: int = 8
+    N: int = 128
+    max_B: int = 32
+    vocab_size: int = 32001
+    dim: int = 1024
+    time_dim: int = 256
+    n_heads: int = 16
+    n_kv_heads: Optional[int] = None
+    n_layers: int = 12
+    rope_scaling: int = 10000
     multiple_of: int = 256
     norm_eps: float = 1e-6
 
@@ -406,8 +406,7 @@ class TokenFlowModel(nn.Module):
 
         self.is_inference = config.is_inference
         self.token_embed = nn.Embedding(config.vocab_size, self.dim)
-        self.time_embed = MLPEmbedder(
-            in_dim=self.time_dim, hidden_dim=config.dim)
+        self.time_embed = MLPEmbedder(in_dim=self.time_dim, dim=config.dim)
 
         self.mask = None if self.is_inference else build_training_mask(config.M, config.N)
 
@@ -423,7 +422,7 @@ class TokenFlowModel(nn.Module):
 
     def forward(
         self, 
-        tokens_or_embeds: torch.Tensor, 
+        input_ids: torch.Tensor, 
         labels: Optional[torch.Tensor] = None, 
         start_pos: Optional[int] = None, 
         time: Optional[float] = None
@@ -439,9 +438,9 @@ class TokenFlowModel(nn.Module):
             dict: Output logits and loss (if in training mode).
         """
         if self.is_inference:
-            return self.inference_forward(tokens_or_embeds, start_pos, time)
+            return self.inference_forward(input_ids, start_pos, time)
         else:
-            return self.training_forward(tokens_or_embeds, labels)
+            return self.training_forward(input_ids, labels)
 
     def training_forward(self, tokens: torch.Tensor, labels: torch.Tensor):
         """

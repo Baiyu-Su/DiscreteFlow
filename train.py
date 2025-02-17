@@ -1,23 +1,17 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import math
-import random
 import argparse
 import importlib.util
 import wandb
 
-from torch.utils.data import DataLoader
-
 from transformers import (
     LlamaTokenizer,
-    AutoModel,         # We will extract the embedding layer from here
     TrainingArguments,
     Trainer
 )
-import datasets
+
 from datasets import load_dataset
 from loguru import logger
+from pprint import pformat
+from dataclasses import asdict
 
 from model import TokenFlowModel, TokenFlowConfig
 from dataloader import DataCollatorFlow
@@ -45,14 +39,22 @@ def main():
     config_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(config_module)
     cfg = config_module.MyConfig
-
     
     tokenizer = LlamaTokenizer.from_pretrained("./.hf_llama")
+    if tokenizer.pad_token is None:
+        tokenizer.add_special_tokens({"pad_token": "<pad>"})
 
-    dataset = load_dataset(
+    train_dataset = load_dataset(
         "allenai/c4",
         "en",
         split="train",
+        cache_dir="./.hf_cache",
+        trust_remote_code=True,
+    )
+    validation_dataset = load_dataset(
+        "allenai/c4",
+        "en",
+        split="validation",
         cache_dir="./.hf_cache",
         trust_remote_code=True,
     )
@@ -65,32 +67,34 @@ def main():
             return_tensors=None,
         )
 
-    tokenized_dataset = dataset.map(
+    train_tokenized_dataset = train_dataset.map(
+        tokenize_function, 
+        batched=True, 
+        remove_columns=["text"],
+        num_proc=16,
+    )
+    validation_tokenized_dataset = validation_dataset.map(
         tokenize_function, 
         batched=True, 
         remove_columns=["text"],
         num_proc=16,
     )
     
-    train_data = tokenized_dataset["train"]
-    validation_data = tokenized_dataset["validation"]
+    train_data = train_tokenized_dataset
+    validation_data = validation_tokenized_dataset
     
-    data_collator_flow = DataCollatorFlow(
-        tokenizer=tokenizer,
-        ctx_len=cfg.M*cfg.N,
-        device="cuda"
-    )
+    data_collator_flow = DataCollatorFlow(tokenizer=tokenizer, ctx_len=cfg.M*cfg.N)
 
     model_config = TokenFlowConfig(
         is_inference=False,
         M=cfg.M,
         N=cfg.N,
-        vocab_size=32000,
+        vocab_size=32001,
         dim=cfg.dim,
-        time_dim=cfg.time_dim,
         n_heads=cfg.n_heads,
         n_layers=cfg.n_layers,
     )
+    logger.info(f"Model Configuration:\n{pformat(asdict(model_config))}")
 
     model = TokenFlowModel(model_config)
 
