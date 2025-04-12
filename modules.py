@@ -81,30 +81,52 @@ def apply_rotary_emb(
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
-def timestep_embedding(t: torch.Tensor, time_dim: int, max_period: int = 10000, time_factor: float = 1000.0):
+def timestep_embedding(
+    t: torch.Tensor,
+    time_dim: int,
+    max_period: int = 10000,
+    time_factor: float = 1000.0
+) -> torch.Tensor:
     """
-    Create sinusoidal timestep embeddings.
+    Create sinusoidal timestep embeddings that work for any shape of `t`.
+    
+    If `t` has shape (...), the result has shape (..., time_dim).
+    Each scalar in `t` gets a separate sinusoidal embedding of size time_dim.
+    
     Args:
-        t (torch.Tensor): Tensor of shape (B, 1) containing time values.
-        time_dim (int): Dimension of the time embedding.
-        max_period (int, optional): Maximum period for the sinusoidal functions. Defaults to 10000.
-        time_factor (float, optional): Scaling factor for time values. Defaults to 1000.0.
-    Returns:
-        torch.Tensor: Sinusoidal timestep embeddings of shape (B, time_dim).
-    """
-    t = time_factor * t
-    half = time_dim // 2
-    freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half).to(
-        t.device
-    )
+        t (torch.Tensor): Arbitrary shape of float time values.
+        time_dim (int): Dimension of the time embedding (output last dimension).
+        max_period (int, optional): Maximum period for the sinusoidal functions.
+        time_factor (float, optional): Scaling factor for time values.
 
-    args = t[:, None].float() * freqs[None]
-    embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-    if time_dim % 2:
-        embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+    Returns:
+        torch.Tensor: Sinusoidal embeddings of shape (..., time_dim).
+    """
+    original_shape = t.shape
+    t_flat = t.reshape(-1).float()  # [num_scalars]
+    t_flat = t_flat * time_factor
+    
+    half = time_dim // 2
+    device = t.device
+    freqs = torch.exp(
+        -math.log(max_period) 
+        * torch.arange(start=0, end=half, dtype=torch.float32, device=device) 
+        / half
+    )  # shape: [half]
+    
+    # Multiply each scalar in t_flat by each frequency => shape: (num_scalars, half)
+    args = t_flat.unsqueeze(-1) * freqs.unsqueeze(0)
+    emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)  # shape: (num_scalars, 2*half)
+    
+    if time_dim % 2 == 1:
+        emb = torch.cat([emb, torch.zeros_like(emb[:, :1])], dim=-1)  # shape: (num_scalars, time_dim)
+    
+    emb = emb.view(*original_shape, time_dim) # shape: original_shape + [time_dim]
+    
     if torch.is_floating_point(t):
-        embedding = embedding.to(t)
-    return embedding
+        emb = emb.to(t)
+    
+    return emb
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -125,7 +147,7 @@ def build_training_mask(M: int, N: int):
     where 0 => can attend, -inf => block.
     """
     total_seq = 2 * M * N
-    mask = torch.full((total_seq, total_seq), float("-inf"), dtype=torch.float32)
+    mask = torch.full((total_seq, total_seq), float("-inf"), dtype=torch.bfloat16)
 
     row_ids = torch.arange(total_seq).unsqueeze(-1)
     col_ids = torch.arange(total_seq).unsqueeze(0)
@@ -151,7 +173,7 @@ def build_training_mask(M: int, N: int):
     return mask
 
 
-def build_inference_mask(start_pos: int, seq_len: int, N: int, device=None) -> torch.Tensor:
+def build_inference_mask(start_pos: int, seq_len: int, N: int) -> torch.Tensor:
     """
     Build a block causal mask for inference.
     
@@ -176,21 +198,18 @@ def build_inference_mask(start_pos: int, seq_len: int, N: int, device=None) -> t
         torch.Tensor: A mask tensor of shape (seqlen, start_pos + seqlen)
                       where allowed positions have value 0 and masked positions -inf.
     """
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
     num_cached_blocks = start_pos // N
     num_current_blocks = seq_len // N
     total_blocks = num_cached_blocks + num_current_blocks
 
-    block_indices = torch.arange(total_blocks, device=device).unsqueeze(0)  # (1, total_blocks)
-    allowed_limit = num_cached_blocks + torch.arange(1, num_current_blocks + 1, device=device).unsqueeze(1)  # (num_current_blocks, 1)
+    block_indices = torch.arange(total_blocks).unsqueeze(0)  # (1, total_blocks)
+    allowed_limit = num_cached_blocks + torch.arange(1, num_current_blocks + 1).unsqueeze(1)  # (num_current_blocks, 1)
     block_mask = torch.where(
         block_indices < allowed_limit,
-        torch.tensor(0.0, device=device),
-        torch.tensor(float("-inf"), device=device)
+        torch.tensor(0.0),
+        torch.tensor(float("-inf"))
     )
-    ones_N = torch.ones((N, N), device=device)
+    ones_N = torch.ones((N, N))
     token_mask = torch.kron(block_mask, ones_N)
     return token_mask
 
@@ -237,9 +256,9 @@ def embed_for_training(input_ids: torch.Tensor, token_embed: nn.Module, time_emb
     """
     X1 = token_embed(input_ids)  # (B, M*N, dim)
     B = X1.shape[0]
-    t_sample = torch.rand((B, M)) # (B, M)
+    t_sample = torch.rand((B, M), device=X1.device) # (B, M)
     t_full = t_sample.repeat_interleave(N, dim=1).unsqueeze(-1) # (B, M*N, 1)
-    X0 = torch.randn_like(X1) # (B, M*N, dim)
+    X0 = 0.02 * torch.randn_like(X1) # (B, M*N, dim)
     Xt = t_full * X1 + (1 - t_full) * X0 # (B, M, N, dim)
 
     X_all = torch.cat([X1, Xt], dim=1)  # (B, 2*M*N, dim)
@@ -247,7 +266,7 @@ def embed_for_training(input_ids: torch.Tensor, token_embed: nn.Module, time_emb
     t_all = torch.cat([t1, t_sample], dim=1)  # (B, 2*M)
     t_vec = time_embed(timestep_embedding(t_all, time_dim))  # (B, 2*M, dim)
 
-    return X_all, t_vec
+    return X_all, t_vec, t_sample
 
 
 def embed_for_inference(input_ids: torch.Tensor, token_embed: nn.Module, N: int) -> torch.Tensor:
@@ -263,7 +282,7 @@ def embed_for_inference(input_ids: torch.Tensor, token_embed: nn.Module, N: int)
     embedded_tokens = token_embed(input_ids) #(B, seqlen, dim)
     B, _, dim = embedded_tokens.shape
 
-    X0 = torch.randn(B, N, dim, device="cuda")
+    X0 = 0.02 * torch.randn(B, N, dim, device=input_ids.device)
     combined_embeddings = torch.cat((embedded_tokens, X0), dim=1) # (B, seqlen+N, dim)
 
     return combined_embeddings

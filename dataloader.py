@@ -1,7 +1,7 @@
 import torch
 
 class DataCollatorFlow:
-    def __init__(self, tokenizer, ctx_len):
+    def __init__(self, tokenizer, ctx_len, block_size=None):
         """
         :param tokenizer: Tokenizer to handle padding.
         :param ctx_len: Desired fixed context length.
@@ -44,6 +44,10 @@ class DataCollatorFlow:
 
         input_ids_tensor = torch.tensor(batch_input_ids, dtype=torch.long)
         labels_tensor = torch.tensor(batch_labels, dtype=torch.long)
+
+        print(input_ids_tensor.size())
+        print(labels_tensor.size())
+
 
         return {
             "input_ids": input_ids_tensor,
