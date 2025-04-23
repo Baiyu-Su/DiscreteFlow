@@ -1,20 +1,19 @@
 #!/bin/bash
-#SBATCH -J llama
+#SBATCH -J NAMD
 #SBATCH -p gh
-#SBATCH -t 48:00:00
+#SBATCH -t 24:00:00
 #SBATCH --nodes=8                # Number of nodes
 #SBATCH --ntasks-per-node=1
-#SBATCH -o logs/flow_train_adamw.o%j  # Output file
-#SBATCH -e logs/flow_train_adamw.e%j   # Error file
+#SBATCH -o logs/flow_train.o%j  # Output file
+#SBATCH -e logs/flow_train.e%j   # Error file
 
 source ~/.bashrc
 conda deactivate
 cd /scratch/10152/baiyusu/DiscreteFlow
 conda activate flowenv
 
-# Define MASTER_ADDR and MASTER_PORT
-MASTER_ADDR=$(srun --nodes=1 --ntasks=1 hostname | head -n1)
-MASTER_PORT=12355
+MASTER_ADDR=$(scontrol show hostname $SLURM_NODELIST | head -n1)
+MASTER_PORT=$((10000 + $RANDOM % 50000))  # pick a random free port
 
 export NCCL_IB_DISABLE=0
 NODE_RANK=$SLURM_NODEID
@@ -36,4 +35,4 @@ srun python -u -m torch.distributed.run \
     --master_addr=$MASTER_ADDR \
     --master_port=$MASTER_PORT \
     train.py \
-    --config configs/config.py
+    --config configs/small_config.py

@@ -1,44 +1,47 @@
 #!/bin/bash
-#SBATCH -J NAMD
+#SBATCH -J flow
 #SBATCH -p gh
 #SBATCH -t 24:00:00
-#SBATCH --nodes=8                # Number of nodes
+#SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
-#SBATCH -o logs/flow_train_med.o%j  # Output file
-#SBATCH -e logs/flow_train_med.e%j   # Error file
+#SBATCH -o logs/flow.o%j
+#SBATCH -e logs/flow.e%j
 
-source ~/.bashrc
-conda deactivate
-cd /scratch/10152/baiyusu/DiscreteFlow
-conda activate flowenv
 
+### Rendezvous info for torch.distributed.run
 MASTER_ADDR=$(scontrol show hostname $SLURM_NODELIST | head -n1)
-# MASTER_PORT=$((10000 + $RANDOM % 50000))  # pick a random free port
 MASTER_PORT=12380
-# ulimit -l unlimited
 
-export NCCL_IB_DISABLE=0
+####— Container & Apptainer options —####
+CONTAINER=/scratch/10152/baiyusu/pytorch_25.03-py3.sif
+APPTAINER_OPTS="--nv \
+  --home /scratch/10152/baiyusu \
+  --bind /scratch/10152/baiyusu:/scratch/10152/baiyusu \
+  --env HOME=/scratch/10152/baiyusu \
+  --env PYTHONUSERBASE=/scratch/10152/baiyusu/packages \
+  --env XDG_CACHE_HOME=/scratch/10152/baiyusu/.cache \
+  --env PIP_NO_CACHE_DIR=1"
+
+export NCCL_IB_DISABLE=1
 NODE_RANK=$SLURM_NODEID
 GPUS_PER_NODE=1
+
+# NCCL settings
 export NCCL_DEBUG=INFO
 
-# Create temp directory for torch inductor cache
-mkdir -p /tmp/torchinductor_cache_${SLURM_PROCID}
 export TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor_cache_${SLURM_PROCID}
-export HF_DATASETS_OFFLINE=1
 
-# Set memory optimization environment variables
-export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
+####— Load module and go to code directory —####
+module load tacc-apptainer
+cd /scratch/10152/baiyusu/DiscreteFlow
 
-# Not using distributed training for debug
-srun python -u -m torch.distributed.run \
-    --nproc_per_node=$GPUS_PER_NODE \
+####— Launch distributed training across all nodes —####
+srun apptainer exec $APPTAINER_OPTS $CONTAINER \
+  python -u -m torch.distributed.run \
+    --nproc_per_node=$SLURM_NTASKS_PER_NODE \
     --nnodes=$SLURM_NNODES \
     --rdzv_id=$SLURM_JOB_ID \
     --rdzv_backend=c10d \
     --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
-    --node_rank=$NODE_RANK \
-    --master_addr=$MASTER_ADDR \
-    --master_port=$MASTER_PORT \
-    train.py \
-    --config configs/med_config.py
+    train.py --config configs/med_config.py
+  "

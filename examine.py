@@ -9,6 +9,7 @@ import numpy as np
 from transformers import LlamaTokenizer
 from model import TokenFlowModel, TokenFlowConfig
 
+# torchrun --standalone examine.py --model_dir out_med --prompt_file prompts.json
 
 def load_model(model_dir, device):
     """
@@ -28,8 +29,8 @@ def load_model(model_dir, device):
     #    For example, if you used M=4, N=256, dim=1024, etc., put those exact numbers here.
     model_config = TokenFlowConfig(
         is_inference=True,  # we want inference mode
-        M=512,                # <-- change to match your training
-        N=1,              # <-- change to match your training
+        M=128,                # <-- change to match your training
+        N=8,              # <-- change to match your training
         vocab_size=32001,   # same as you used in training
         dim=1024,           # ...
         n_heads=16,
@@ -77,7 +78,7 @@ def main():
     prompt_tokens = [tokenizer.encode(prompt, add_special_tokens=False) for prompt in prompts]
 
     # Example time schedule (must start at 0 and end at 1)
-    time_schedule = (np.linspace(0, 0.8, 256)).tolist()
+    time_schedule = (np.linspace(0, 0.9, 128)).tolist()
     print(time_schedule)
 
     print(f"pad_token_id: {tokenizer.pad_token_id}, eos_token_id: {tokenizer.eos_token_id}")
@@ -86,7 +87,7 @@ def main():
     completions_tokens = model.generate(
         prompt_tokens,
         time_schedule=time_schedule,
-        top_p=1.0,
+        top_p=0.95,
         echo=False,
         pad_id=tokenizer.pad_token_id,
         eos_id=tokenizer.eos_token_id,
@@ -96,10 +97,8 @@ def main():
     # completions = [tokenizer.decode(tokens, skip_special_tokens=False) for tokens in completions_tokens]
     completions = []
     for tokens in completions_tokens:
-        blocks = [tokens[i:i + model.N] for i in range(0, len(tokens), model.N)]
-        decoded_blocks = [tokenizer.decode(block, skip_special_tokens=False) for block in blocks]
-        completion_with_separator = " | ".join(decoded_blocks)
-        completions.append(completion_with_separator)
+        completion = tokenizer.decode(tokens, skip_special_tokens=False)
+        completions.append(completion)
 
     # Print results
     for prompt, completion in zip(prompts, completions):

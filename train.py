@@ -1,10 +1,12 @@
 import os
 import json
 import multiprocessing
+from pathlib import Path
 
 import argparse
 import importlib.util
 import wandb
+from torch.utils.data import DataLoader
 
 from transformers import (
     LlamaTokenizer,
@@ -16,13 +18,12 @@ import torch
 import torch.nn as nn
 
 from datasets import load_dataset
-from datasets import load_from_disk
 from loguru import logger
 from pprint import pformat
 from dataclasses import asdict
 
 from model import TokenFlowModel, TokenFlowConfig
-from dataloader import DataCollatorFlow
+from dataloader import DataCollatorPretrainFlow
 
 
 def load_pretrained_embedding(cfg, model):
@@ -62,46 +63,99 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.add_special_tokens({"pad_token": "<pad>"})
 
-    train_dataset = load_dataset(
-        "allenai/c4",
-        "en",
-        split="train",
-        cache_dir="./.hf_cache",
-        trust_remote_code=True,
-    )
-    validation_dataset = load_dataset(
-        "allenai/c4",
-        "en",
-        split="validation",
-        cache_dir="./.hf_cache",
-        trust_remote_code=True,
-    )
+    # your paths
+    CACHE_DIR  = "/scratch/10152/baiyusu/.hf/datasets"
+    DISK_TRAIN = "/scratch/10152/baiyusu/fineweb_10b/train.arrow"
+    DISK_VALID = "/scratch/10152/baiyusu/fineweb_10b/valid.arrow"
 
+    # make sure parent exists
+    Path(DISK_TRAIN).parent.mkdir(parents=True, exist_ok=True)
+
+    # push HF caches into your scratch
+    os.environ["HF_DATASETS_CACHE"]  = CACHE_DIR
+    os.environ["TRANSFORMERS_CACHE"] = str(Path(CACHE_DIR).parent / "hf_models")
+
+    # 1) download + shuffle + split (all cached by HF under CACHE_DIR)
+    raw = load_dataset(
+        "HuggingFaceFW/fineweb",
+        "sample-10BT",
+        split="train",
+        cache_dir=CACHE_DIR,
+        streaming=False,
+    ).shuffle(seed=42)
+
+    split = raw.train_test_split(test_size=0.002, shuffle=False)
+    train_raw = split["train"]
+    valid_raw = split["test"]
+
+    # 2) tokenize → write to DISK_{TRAIN,VALID}.arrow on first run, skip thereafter
     def tokenize_function(examples):
         return tokenizer(
-            examples["text"], 
-            truncation=True, 
-            max_length=1024, 
-            return_tensors=None,
+            examples["text"],
+            truncation=True,
+            max_length=1024,
         )
 
-    train_tokenized_dataset = train_dataset.map(
-        tokenize_function, 
-        batched=True, 
+    train_data = train_raw.map(
+        tokenize_function,
+        batched=True,
         remove_columns=["text"],
         num_proc=16,
+        cache_file_name=DISK_TRAIN
     )
-    validation_tokenized_dataset = validation_dataset.map(
-        tokenize_function, 
-        batched=True, 
+
+    validation_data = valid_raw.map(
+        tokenize_function,
+        batched=True,
         remove_columns=["text"],
         num_proc=16,
+        cache_file_name=DISK_VALID
     )
+
+    # example = train_data[0]
+
+    # # option A: view the dict‑keys
+    # print(example.keys())
+
+    # print(example["attention_mask"])  # attention mask is always present
+
+    # # option B: Hugging Face Datasets also exposes .column_names
+    # print(train_data.column_names)
+
+    # # option C: inspect the Feature spec
+    # print(train_data.features)
     
-    train_data = train_tokenized_dataset
-    validation_data = validation_tokenized_dataset
-    
-    data_collator_flow = DataCollatorFlow(tokenizer=tokenizer, ctx_len=cfg.M*cfg.N, block_size=cfg.N)
+    data_collator = DataCollatorPretrainFlow(tokenizer=tokenizer, ctx_len=cfg.M*cfg.N, N=cfg.N)
+
+    # wrap your tokenized dataset in a DataLoader
+    train_loader = DataLoader(
+        train_data,
+        batch_size=4,                  # print 4 examples
+        shuffle=True,
+        collate_fn=data_collator,
+        num_workers=cfg.dataloader_num_workers,
+    )
+
+    # grab one batch
+    batch = next(iter(train_loader))
+    input_ids = batch["input_ids"]    # (4, ctx_len)
+    labels    = batch["labels"]       # (4, ctx_len)
+
+    # loop and decode
+    for i in range(input_ids.size(0)):
+        # full context (including padding)
+        tokens = input_ids[i].tolist()
+        decoded_input = tokenizer.decode(tokens, skip_special_tokens=False, clean_up_tokenization_spaces=True)
+
+        # only the real tokens (ignore -100 labels)
+        label_ids = [tok for tok in labels[i].tolist() if tok != -100]
+        decoded_labels = tokenizer.decode(label_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True)
+
+        print(f"--- Example {i} ---")
+        print("Input IDs  :", tokens)
+        print("\n Decoded in :", decoded_input)
+        print("\n Decoded lbl:", decoded_labels)
+        print()
 
     model_config = TokenFlowConfig(
         is_inference=False,
@@ -170,7 +224,7 @@ def main():
         args=training_args,
         train_dataset=train_data,
         eval_dataset=validation_data,
-        data_collator=data_collator_flow,
+        data_collator=data_collator,
     )
 
     if training_args.process_index == 0:

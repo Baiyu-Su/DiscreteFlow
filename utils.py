@@ -239,55 +239,6 @@ def nucleus_cutoff(probs: torch.Tensor, p: float) -> torch.Tensor:
     return probs_new
 
 
-def embed_for_training(input_ids: torch.Tensor, token_embed: nn.Module, time_embed: nn.Module, M: int, N: int, time_dim: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Embeds clean input tokens and appends random noise embeddings.
-    Args:
-        input_ids (torch.Tensor): Tensor of shape (B, seq_len) containing token indices.
-        token_embed (nn.Module): Embedding module (nn.Embedding) that converts token indices to embeddings.
-        time_embed (nn.Module): Embedding module for time embeddings.
-        M (int): Number of blocks in the sequence.
-        N (int): Generation block size.
-        time_dim (int): Dimension of the time embedding.
-    Returns:    
-        Tuple[torch.Tensor, torch.Tensor]: Tuple containing:
-            - X_all (torch.Tensor): Concatenated tensor of shape (B, 2*M*N, dim) where dim is model dimension.
-            - t_vec (torch.Tensor): Time embeddings of shape (B, 2*M, time_dim).
-    """
-    X1 = token_embed(input_ids)  # (B, M*N, dim)
-    B = X1.shape[0]
-    t_sample = torch.rand((B, M), device=X1.device) # (B, M)
-    t_full = t_sample.repeat_interleave(N, dim=1).unsqueeze(-1) # (B, M*N, 1)
-    X0 = 0.02 * torch.randn_like(X1) # (B, M*N, dim)
-    Xt = t_full * X1 + (1 - t_full) * X0 # (B, M, N, dim)
-
-    X_all = torch.cat([X1, Xt], dim=1)  # (B, 2*M*N, dim)
-    t1 = torch.ones_like(t_sample)  # (B, M)
-    t_all = torch.cat([t1, t_sample], dim=1)  # (B, 2*M)
-    t_vec = time_embed(timestep_embedding(t_all, time_dim))  # (B, 2*M, dim)
-
-    return X_all, t_vec, t_sample
-
-
-def embed_for_inference(input_ids: torch.Tensor, token_embed: nn.Module, N: int) -> torch.Tensor:
-    """
-    Embeds clean input tokens and appends random noise embeddings.
-    Args:
-        input_ids (torch.Tensor): Tensor of shape (B, seq_len) containing token indices.
-        token_embed (nn.Module): Embedding module (e.g., nn.Embedding) that converts token indices to embeddings.
-        N (int): Generation block size.
-    Returns:
-        torch.Tensor: Concatenated tensor of shape (B, seq_len+N, dim) where dim is the embedding dimension.
-    """
-    embedded_tokens = token_embed(input_ids) #(B, seqlen, dim)
-    B, _, dim = embedded_tokens.shape
-
-    X0 = 0.02 * torch.randn(B, N, dim, device=input_ids.device)
-    combined_embeddings = torch.cat((embedded_tokens, X0), dim=1) # (B, seqlen+N, dim)
-
-    return combined_embeddings
-
-
 def build_time_tensor(time: float, seq_len: int, B: int, N: int) -> torch.Tensor:
     """
     Create a time tensor based on the sequence length and time value.
@@ -315,7 +266,7 @@ def build_time_tensor(time: float, seq_len: int, B: int, N: int) -> torch.Tensor
         return torch.full((B, 1), time, dtype=torch.float)
     else:
         row = torch.cat([
-            torch.ones(k - 1, dtype=torch.float),
+            torch.ones(k - 1, dtype=torch.float) * 1.0,
             torch.tensor([time], dtype=torch.float)
         ])
         return row.unsqueeze(0).repeat(B, 1)

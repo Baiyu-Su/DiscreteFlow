@@ -1,4 +1,3 @@
-import math
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 
@@ -6,9 +5,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from typing import Tuple, Optional
+from transformers import PreTrainedModel, PretrainedConfig
+from transformers.modeling_outputs import CausalLMOutput
 
-from modules import (
+from typing import Tuple, Optional, Union
+
+from utils import (
     precompute_freqs_cis,
     apply_rotary_emb,
     build_training_mask,
@@ -16,27 +18,47 @@ from modules import (
     timestep_embedding,
     repeat_kv,
     nucleus_cutoff,
-    embed_for_training,
-    embed_for_inference,
     build_time_tensor,
 )
 
 
-@dataclass
-class TokenFlowConfig:
-    is_inference: bool = False
-    M: int = 8
-    N: int = 128
-    max_B: int = 32
-    vocab_size: int = 32001
-    dim: int = 1024
-    time_dim: int = 256
-    n_heads: int = 16
-    n_kv_heads: Optional[int] = None
-    n_layers: int = 12
-    rope_scaling: int = 10000
-    multiple_of: int = 256
-    norm_eps: float = 1e-6
+class TokenFlowConfig(PretrainedConfig):
+    model_type = "tokenflow"  # used internally by HF for registry & save/load
+
+    def __init__(
+        self,
+        is_inference: bool = False,
+        M: int = 128,
+        N: int = 8,
+        max_B: int = 32,
+        vocab_size: int = 32001,
+        dim: int = 1024,
+        time_dim: int = 256,
+        n_heads: int = 16,
+        n_kv_heads: Optional[int] = None,
+        n_layers: int = 12,
+        rope_scaling: int = 10000,
+        multiple_of: int = 256,
+        norm_eps: float = 1e-6,
+        **kwargs,                      # catch any additional HF args
+    ):
+        # this handles e.g. `id2label`, `label2id`, `torch_dtype`, etc.
+        super().__init__(**kwargs)
+
+        # now assign your own fields
+        self.is_inference = is_inference
+        self.M            = M
+        self.N            = N
+        self.max_B        = max_B
+        self.vocab_size   = vocab_size
+        self.dim          = dim
+        self.time_dim     = time_dim
+        self.n_heads      = n_heads
+        self.n_kv_heads   = n_kv_heads or n_heads
+        self.n_layers     = n_layers
+        self.rope_scaling = rope_scaling
+        self.multiple_of  = multiple_of
+        self.norm_eps     = norm_eps
 
 
 class RMSNorm(nn.Module):
@@ -217,19 +239,10 @@ class Attention(nn.Module):
         freqs_cis: torch.Tensor,
         mask: torch.Tensor,
     ):
-        """
-        Forward pass of the attention module.
-        Args:
-            x (torch.Tensor): Input tensor.
-            start_pos (int): Starting position for caching.
-            freqs_cis (torch.Tensor): Precomputed frequency tensor.
-            mask (torch.Tensor): Attention mask tensor.
-        Returns:
-            torch.Tensor: Output tensor after attention.
-        """
         B, seq_len, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
+        # reshape into heads
         xq = xq.view(B, seq_len, self.n_heads, self.head_dim)
         xk = xk.view(B, seq_len, self.n_kv_heads, self.head_dim)
         xv = xv.view(B, seq_len, self.n_kv_heads, self.head_dim)
@@ -239,32 +252,42 @@ class Attention(nn.Module):
         if self.is_inference:
             self.cache_k = self.cache_k.to(xq)
             self.cache_v = self.cache_v.to(xq)
-            # cache keys/values
-            # only cache previous finished blocks, not the current flow block
-            self.cache_k[:B, start_pos: start_pos + seq_len - self.N] = xk
-            self.cache_v[:B, start_pos: start_pos + seq_len - self.N] = xv
 
-            keys = self.cache_k[:B, : start_pos + seq_len]
-            values = self.cache_v[:B, : start_pos + seq_len]
+            block_len = seq_len - self.N
+            if block_len > 0:
+                self.cache_k[:B, start_pos:start_pos+block_len] = xk[:, :block_len]
+                self.cache_v[:B, start_pos:start_pos+block_len] = xv[:, :block_len]
+
+            keys   = self.cache_k[:B, :start_pos+seq_len]
+            values = self.cache_v[:B, :start_pos+seq_len]
         else:
             del start_pos
-            keys = xk
-            values = xv
+            keys, values = xk, xv
 
-        # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(keys, self.n_rep) # (bs, cache_len + seq_len, n_heads, head_dim)
-        values = repeat_kv(values, self.n_rep) # (bs, cache_len + seq_len, n_heads, head_dim)
+        # expand kv heads if needed
+        keys   = repeat_kv(keys,   self.n_rep)  # → (B, Lk, H, D)
+        values = repeat_kv(values, self.n_rep)  # → (B, Lk, H, D)
 
-        xq = xq.transpose(1, 2)  # (bs, n_heads, seq_len, head_dim)
-        keys = keys.transpose(1, 2) # (bs, n_heads, cache_len + seq_len, head_dim)
-        values = values.transpose(1, 2) # (bs, n_heads, cache_len + seq_len, head_dim)
-        scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
-        if mask is not None:
-            scores = scores + mask # (bs, n_heads, seq_len, cache_len + seq_len)
-        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-        output = torch.matmul(scores, values) # (bs, n_heads, seq_len, head_dim)
-        output = output.transpose(1, 2).contiguous().view(B, seq_len, -1) # (bs, seq_len, dim)
+        # transpose into (B, H, L, D)
+        q = xq.transpose(1, 2)     # (B, H, L, D)
+        k = keys.transpose(1, 2)   # (B, H, Lk, D)
+        v = values.transpose(1, 2) # (B, H, Lk, D)
+
+        # free big tensors asap
+        del xq, keys, values
+
+        # now call the built‑in SDPA
+        output = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=mask,    # broadcasts to (B, H, L, Lk)
+            is_causal=False,
+            dropout_p=0.0,
+        )
+
+        # back to (B, L, H, D) → combine heads → project
+        output = output.transpose(1, 2).reshape(B, seq_len, -1)
         return self.wo(output)
+
 
 
 class FeedForward(nn.Module):
@@ -372,7 +395,7 @@ class TokenFlowBlock(nn.Module):
         return out
 
 
-class TokenFlowModel(nn.Module):
+class TokenFlowModel(PreTrainedModel):
     def __init__(self, config: TokenFlowConfig):
         """
         Initialize a Token Flow Model.
@@ -395,7 +418,8 @@ class TokenFlowModel(nn.Module):
             output_proj (nn.Linear): Output projection layer.
             freqs_cis (torch.Tensor): Precomputed frequency tensors.
         """
-        super().__init__()
+        super().__init__(config)
+        self.config = config
         self.n_layers = config.n_layers
         self.n_heads = config.n_heads
         self.M = config.M
@@ -408,7 +432,10 @@ class TokenFlowModel(nn.Module):
         self.token_embed = nn.Embedding(config.vocab_size, self.dim)
         self.time_embed = MLPEmbedder(in_dim=self.time_dim, dim=config.dim)
 
-        self.mask = None if self.is_inference else build_training_mask(config.M, config.N)
+        if not self.is_inference:
+            mask_2d = build_training_mask(config.M, config.N).to(torch.bfloat16)  # shape (2MN, 2MN)
+            mask_4d = mask_2d.unsqueeze(0).unsqueeze(0)  # shape (1, 1, 2MN, 2MN)
+            self.register_buffer("mask", mask_4d, persistent=False)
 
         self.layers = torch.nn.ModuleList()
         for layer_id in range(config.n_layers):
@@ -417,16 +444,94 @@ class TokenFlowModel(nn.Module):
         self.final_layer_norm = RMSNorm(config.dim, eps=config.norm_eps)
         self.output_proj = nn.Linear(config.dim, config.vocab_size, bias=False)
 
-        self.freqs_cis = precompute_freqs_cis(
+        freqs_cis = precompute_freqs_cis(
             self.dim//self.n_heads, self.M*self.N, config.rope_scaling)
+        self.register_buffer("freqs_cis", freqs_cis, persistent=False)
+
+    
+    def embed_for_training(self, input_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Embeds clean input tokens and appends random noise embeddings.
+        Args:
+            input_ids (torch.Tensor): Tensor of shape (B, seq_len) containing token indices.
+            token_embed (nn.Module): Embedding module (nn.Embedding) that converts token indices to embeddings.
+            time_embed (nn.Module): Embedding module for time embeddings.
+            M (int): Number of blocks in the sequence.
+            N (int): Generation block size.
+            time_dim (int): Dimension of the time embedding.
+        Returns:    
+            Tuple[torch.Tensor, torch.Tensor]: Tuple containing:
+                - X_all (torch.Tensor): Concatenated tensor of shape (B, 2*M*N, dim) where dim is model dimension.
+                - t_vec (torch.Tensor): Time embeddings of shape (B, 2*M, time_dim).
+        """
+        X1 = self.token_embed(input_ids)  # (B, M*N, dim)
+        B = X1.shape[0]
+        t_sample = torch.empty((B, self.M),
+                               device=X1.device,
+                               dtype=X1.dtype).beta_(2.0, 5.0)  # (B, M)
+        t_full = t_sample.repeat_interleave(self.N, dim=1).unsqueeze(-1) # (B, M*N, 1)
+        X0 = 0.0367 * torch.randn_like(X1) # (B, M*N, dim)
+        Xt = t_full * X1 + (1 - t_full) * X0 # (B, M, N, dim)
+
+        X_all = torch.cat([X1, Xt], dim=1)  # (B, 2*M*N, dim)
+        t1 = torch.ones_like(t_sample)  # (B, M)
+        t_all = torch.cat([t1, t_sample], dim=1)  # (B, 2*M)
+        t_vec = self.time_embed(timestep_embedding(t_all, self.time_dim))  # (B, 2*M, dim)
+
+        return X_all, t_vec, t_full
+
+    
+    def embed_for_inference(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Embeds clean input tokens and appends random noise embeddings.
+        Args:
+            input_ids (torch.Tensor): Tensor of shape (B, seq_len) containing token indices.
+            token_embed (nn.Module): Embedding module (e.g., nn.Embedding) that converts token indices to embeddings.
+            N (int): Generation block size.
+        Returns:
+            torch.Tensor: Concatenated tensor of shape (B, seq_len+N, dim) where dim is the embedding dimension.
+        """
+        embedded_tokens = self.token_embed(input_ids) #(B, seqlen, dim)
+        B, _, dim = embedded_tokens.shape
+
+        X0 = 0.0367 * torch.randn(B, self.N, dim, device=input_ids.device)
+        combined_embeddings = torch.cat((embedded_tokens, X0), dim=1) # (B, seqlen+N, dim)
+
+        return combined_embeddings
+    
+        
+    def compute_flow_logits(self, xt: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """
+        xt:     (B, seq_len=M*N, d)
+        t_full: (B, seq_len)           -- per‐position time
+        returns flow_logits of shape (B, seq_len, V)
+        """
+        E = self.token_embed.weight # (V, d)
+        V, d = E.shape
+
+        xt_norm2 = xt.pow(2).sum(dim=-1, keepdim=True) # (B, seq_len, 1)
+        E_norm2 = E.pow(2).sum(dim=-1).view(1, 1, V) # (1, 1, V)
+
+        cross = xt @ E.t() # (B, seq_len, V)
+        # print(f"shape of t: {t.shape}, shape of cross: {cross.shape}, shape of xt_norm2: {xt_norm2.shape}, shape of E_norm2: {E_norm2.shape}")
+        D = xt_norm2 - 2 * t * cross + (t**2) * E_norm2  # (B, seq_len, V)
+        denom = 2 * (1 - t).pow(2) # (B, seq_len, 1)
+        D_scaled = D / denom # (B, seq_len, V)
+
+        logZ = torch.logsumexp(-D_scaled, dim=-1, keepdim=True) # (B, seq_len, 1)
+
+        return D_scaled + logZ
+        
 
     def forward(
         self, 
-        input_ids: torch.Tensor, 
-        labels: Optional[torch.Tensor] = None, 
+        input_ids: torch.LongTensor,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
         start_pos: Optional[int] = None, 
-        time: Optional[float] = None
-    ) -> dict:
+        time: Optional[float] = None,
+        **kwargs
+    ) -> Union[Tuple, CausalLMOutput]:
         """
         Forward pass through the TokenFlow model. Depending on the mode (training or inference), it processes the input tokens or embeddings and computes the output logits and loss.
         Args:
@@ -438,6 +543,7 @@ class TokenFlowModel(nn.Module):
             dict: Output logits and loss (if in training mode).
         """
         if self.is_inference:
+            del attention_mask
             return self.inference_forward(input_ids, start_pos, time)
         else:
             return self.training_forward(input_ids, labels)
@@ -457,7 +563,8 @@ class TokenFlowModel(nn.Module):
 
         start_pos = 0
         self.freqs_cis = self.freqs_cis.to(tokens.device)
-        h, t_vec = embed_for_training(tokens, self.token_embed, self.time_embed, self.M, self.N, self.time_dim)
+        h, t_vec, t_full = self.embed_for_training(tokens)
+        xt = h[:, self.M * self.N:, :].detach().clone()
 
         freqs_cis = self.freqs_cis.repeat(2, 1)
         mask = self.mask
@@ -471,10 +578,40 @@ class TokenFlowModel(nn.Module):
         h = h[:, self.M * self.N:, :]
         h = self.final_layer_norm(h)
         logits = self.output_proj(h)
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-100)
+        with torch.no_grad():
+            flowlogits = self.compute_flow_logits(xt, t_full)
+            
+        logits.sub_(flowlogits)
 
-        return {"logits": logits.float(), "loss": loss}
+        # ce_tokenwise = F.cross_entropy(
+        #     logits.view(-1, logits.size(-1)),       # (B*M*N, vocab_size)
+        #     labels.reshape(-1),                # (B*M*N,)
+        #     ignore_index=-100,
+        #     reduction='none'
+        # )
+        # del logits
+        # ce_tokenwise = ce_tokenwise.view(B, self.M * self.N)  # shape (B, M*N)
 
+        # weights = (1.0 / t_full.clamp_min(1e-8).squeeze()).clamp_max(100.0)
+        # weighted_ce = ce_tokenwise * weights
+        # valid_mask = (labels != -100).float()
+        # weighted_loss_sum = (weighted_ce * valid_mask).sum()
+        # weight_sum = (weights * valid_mask).sum()
+        # loss = weighted_loss_sum / (weight_sum + 1e-8)
+        
+        loss = F.cross_entropy(
+            logits.view(-1, logits.size(-1)), 
+            labels.reshape(-1), 
+            ignore_index=-100, 
+            reduction="mean"
+        )
+
+        return CausalLMOutput(
+            loss=loss,
+            logits=logits
+        )
+
+    @torch.inference_mode()
     def inference_forward(self, h: torch.Tensor, start_pos: int, time: float):
         """
         Forward pass for inference mode.
@@ -491,17 +628,25 @@ class TokenFlowModel(nn.Module):
         assert time is not None, "Inference mode requires time."
 
         self.freqs_cis = self.freqs_cis.to(h.device)
-        time_tensor = build_time_tensor(time, seq_len, B, self.N)
+        time_tensor = build_time_tensor(time, seq_len, B, self.N).to(h.device)
         t_vec = self.time_embed(timestep_embedding(time_tensor, self.time_dim))
 
         freqs_cis = self.freqs_cis[start_pos: start_pos + seq_len]
-        mask = build_inference_mask(seq_len, self.N, start_pos).to(h.device)
+        mask = build_inference_mask(start_pos, seq_len, self.N).to(h.device)
+
+        xt = h[:, -self.N:, :].detach().clone()
 
         for layer in self.layers:
             h = layer(h, t_vec, start_pos, freqs_cis, mask)
 
         h = self.final_layer_norm(h)
         logits = self.output_proj(h)
+
+        t_full = time_tensor[:, -1].reshape(-1, 1, 1)
+        t_full = t_full.expand(-1, self.N, -1)  #
+
+        flowlogits = self.compute_flow_logits(xt, t_full)
+        logits[:, -self.N:, :].sub_(flowlogits)
 
         return {"logits": logits}
 
@@ -532,7 +677,7 @@ class TokenFlowModel(nn.Module):
         B = len(prompt_tokens)
         assert B <= self.max_B, f"Batch size {B} exceeds maximum batch size {self.max_B}."
         assert all(0 <= x <= 1 for x in time_schedule), "Time steps must between 0 and 1."
-        assert time_schedule[0] == 0 and time_schedule[-1] == 1, "Time schedule must start with 0 and end with 1."
+        # assert time_schedule[0] == 0 and time_schedule[-1] == 1, "Time schedule must start with 0 and end with 1."
 
         max_prompt_len = max(len(t) for t in prompt_tokens)
         ctx_len = self.M * self.N
@@ -550,33 +695,56 @@ class TokenFlowModel(nn.Module):
             tokens[k, :len(new_prompt)] = torch.tensor(new_prompt, dtype=torch.long, device="cuda")
 
         min_prompt_len = min(len(t) for t in prompt_tokens)
+        min_padded_len = ((min_prompt_len) // self.N + 1) * self.N
 
         prev_pos = 0
         eos_reached = torch.tensor([False] * B, device="cuda")
         input_text_mask = tokens != pad_id
 
-        for cur_pos in range(min_prompt_len, total_len, self.N):
-            Xt = embed_for_inference(tokens[:, prev_pos:cur_pos], self.token_embed, self.N)
+        import numpy as np
+        Xt_storage = {}
+
+        for cur_pos in range(min_padded_len, total_len, self.N):
+            Xt = self.embed_for_inference(tokens[:, prev_pos:cur_pos])
+            block_idx = cur_pos // self.N
+            tracked_Xt = [] if block_idx in [50, 100, 150, 200] else None
 
             for i, (time, next_time) in enumerate(zip(time_schedule[:-1], time_schedule[1:])):
-                logits = self.forward(Xt, prev_pos, time)["logits"]
+                logits = self.forward(Xt, start_pos=prev_pos, time=time)["logits"]
+                # logits = self.forward(Xt, start_pos=0, time=time)["logits"]
                 if i == 0:
                     prev_pos = cur_pos
-                    Xt = Xt[:, prev_pos:cur_pos+self.N]
+                    Xt = Xt[:, -self.N:]
 
                 probs = torch.softmax(logits[:, -self.N:], dim=-1)
-                probs = nucleus_cutoff(probs, top_p) if top_p < 1 else probs
+                # probs = nucleus_cutoff(probs, top_p) if top_p < 1 else probs
 
                 E = self.token_embed.weight
                 X1t = torch.matmul(probs, E) # \Hat{X1} estimation at time t is exptectation of embedding vectors
                 alpha = (next_time - time) / (1 - time) # (t_{i+1} - t_i) / (1 - t_i)
                 Xt.lerp_(X1t, alpha)
 
-            # Sample next block of tokens deterministically according to model logits of X1
-            X1_logits = self.forward(Xt, prev_pos, 1.)["logits"]
-            next_tokens = torch.argmax(X1_logits[:, -self.N:], dim=-1)
+                if tracked_Xt is not None:
+                    tracked_Xt.append(Xt[0].detach().cpu().numpy())
+            
+            if tracked_Xt is not None:
+                Xt_storage[block_idx] = np.stack(tracked_Xt, axis=0)
+                print(f"Stored X_t evolution for block {block_idx}: shape {Xt_storage[block_idx].shape}")
 
-            # only replace token if prompt has already been generated
+            X1_logits = self.forward(Xt, start_pos=prev_pos, time=0.9)["logits"]
+
+            probs  = F.softmax(X1_logits, dim=-1)         # (B, N, V)
+
+            B, N, V = probs.shape
+            probs_flat = probs.view(-1, V)             # (B*N, V)
+            probs_flat = nucleus_cutoff(probs_flat, top_p) if top_p < 1 else probs_flat
+
+            # draw one sample per row
+            samples_flat = torch.multinomial(probs_flat, num_samples=1)  # (B*N, 1)
+
+            # reshape back to (B, N)
+            next_tokens = samples_flat.squeeze(-1).view(B, N)
+
             next_tokens = torch.where(input_text_mask[:, cur_pos:cur_pos+self.N], tokens[:,cur_pos:cur_pos+self.N], next_tokens)
             tokens[:, cur_pos:cur_pos+self.N] = next_tokens
 
@@ -593,11 +761,14 @@ class TokenFlowModel(nn.Module):
         out_tokens = []
         for i, toks in enumerate(tokens.tolist()):
             # cut to max gen len
-            start = 0 if echo else len(prompt_tokens[i])
-            toks = toks[start: self.ctx_len]
-            # cut to eos tok if any
+            # start = 0 if echo else len(prompt_tokens[i])
+            # toks = toks[start: ctx_len]
             if eos_id in toks:
                 eos_idx = toks.index(eos_id)
                 toks = toks[:eos_idx]
+                
             out_tokens.append(toks)
+
+        np.save('Xt_storage.npy', Xt_storage)
+        print("Saved X_t evolution data to 'Xt_storage.npy'.")
         return out_tokens

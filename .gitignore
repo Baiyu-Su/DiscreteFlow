@@ -1,0 +1,14 @@
+fineweb10b/
+logs/
+out*/
+triton/
+wandb/
+*.npy
+flow/
+
+
+.hf_llama/
+.llama/
+.local/
+.pkgs/
+$SCRATCH/
