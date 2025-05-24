@@ -5,6 +5,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import math
+
 from transformers import PreTrainedModel, PretrainedConfig
 from transformers.modeling_outputs import CausalLMOutput
 
@@ -276,7 +278,6 @@ class Attention(nn.Module):
         # free big tensors asap
         del xq, keys, values
 
-        # now call the built‑in SDPA
         output = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=mask,    # broadcasts to (B, H, L, Lk)
@@ -447,6 +448,7 @@ class TokenFlowModel(PreTrainedModel):
         freqs_cis = precompute_freqs_cis(
             self.dim//self.n_heads, self.M*self.N, config.rope_scaling)
         self.register_buffer("freqs_cis", freqs_cis, persistent=False)
+        self.beta_dist = None
 
     
     def embed_for_training(self, input_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -466,9 +468,14 @@ class TokenFlowModel(PreTrainedModel):
         """
         X1 = self.token_embed(input_ids)  # (B, M*N, dim)
         B = X1.shape[0]
-        t_sample = torch.empty((B, self.M),
-                               device=X1.device,
-                               dtype=X1.dtype).beta_(2.0, 5.0)  # (B, M)
+        if self.beta_dist is None or self.beta_dist.concentration0.device != X1.device:
+            self.beta_dist = torch.distributions.Beta(
+                torch.tensor(2.0, device=X1.device),
+                torch.tensor(6.0, device=X1.device),
+            )
+
+        # sample (B, M) from Beta(2,5)
+        t_sample = self.beta_dist.sample((B, self.M))  # (B, M)
         t_full = t_sample.repeat_interleave(self.N, dim=1).unsqueeze(-1) # (B, M*N, 1)
         X0 = 0.0367 * torch.randn_like(X1) # (B, M*N, dim)
         Xt = t_full * X1 + (1 - t_full) * X0 # (B, M, N, dim)
@@ -581,23 +588,7 @@ class TokenFlowModel(PreTrainedModel):
         with torch.no_grad():
             flowlogits = self.compute_flow_logits(xt, t_full)
             
-        logits.sub_(flowlogits)
-
-        # ce_tokenwise = F.cross_entropy(
-        #     logits.view(-1, logits.size(-1)),       # (B*M*N, vocab_size)
-        #     labels.reshape(-1),                # (B*M*N,)
-        #     ignore_index=-100,
-        #     reduction='none'
-        # )
-        # del logits
-        # ce_tokenwise = ce_tokenwise.view(B, self.M * self.N)  # shape (B, M*N)
-
-        # weights = (1.0 / t_full.clamp_min(1e-8).squeeze()).clamp_max(100.0)
-        # weighted_ce = ce_tokenwise * weights
-        # valid_mask = (labels != -100).float()
-        # weighted_loss_sum = (weighted_ce * valid_mask).sum()
-        # weight_sum = (weights * valid_mask).sum()
-        # loss = weighted_loss_sum / (weight_sum + 1e-8)
+        logits = logits - flowlogits
         
         loss = F.cross_entropy(
             logits.view(-1, logits.size(-1)), 
@@ -646,6 +637,25 @@ class TokenFlowModel(PreTrainedModel):
         t_full = t_full.expand(-1, self.N, -1)  #
 
         flowlogits = self.compute_flow_logits(xt, t_full)
+        model_norms = logits[:, -self.N:, :].norm(p=2, dim=-1)      # shape [B, N]
+        flow_norms  = flowlogits.norm(p=2, dim=-1)  # shape [B, N]
+
+        # 2) compute their ratio
+        ratio = flow_norms / (model_norms + 1e-8)    # shape [B, N]
+
+        # 3) flatten to [B*N] so we can get overall stats
+        model_norms = model_norms.view(-1)
+        flow_norms  = flow_norms.view(-1)
+        ratio       = ratio.view(-1)
+
+        # 4) print summary stats
+        def stats(x, name):
+            print(f"time {time}, {name:12s} | mean {x.mean():.4f}  std {x.std():.4f}  "
+                f"min {x.min():.4f}  max {x.max():.4f}")
+
+        stats(model_norms, "Model ‖⋅‖₂")
+        stats(flow_norms,  "Flow  ‖⋅‖₂")
+        stats(ratio,       "Ratio flow/model")
         logits[:, -self.N:, :].sub_(flowlogits)
 
         return {"logits": logits}
@@ -677,29 +687,31 @@ class TokenFlowModel(PreTrainedModel):
         B = len(prompt_tokens)
         assert B <= self.max_B, f"Batch size {B} exceeds maximum batch size {self.max_B}."
         assert all(0 <= x <= 1 for x in time_schedule), "Time steps must between 0 and 1."
-        # assert time_schedule[0] == 0 and time_schedule[-1] == 1, "Time schedule must start with 0 and end with 1."
+        total_len = self.M * self.N // 2
 
-        max_prompt_len = max(len(t) for t in prompt_tokens)
-        ctx_len = self.M * self.N
-        assert max_prompt_len <= ctx_len, f"Prompt length {max_prompt_len} exceeds context length {ctx_len}."
-        total_len = ctx_len
+        lengths = [len(t) for t in prompt_tokens]
 
+        # 4) Compute a common truncation length that’s a multiple of N
+        min_len = min(lengths)
+        trunc_len = (min_len // self.N) * self.N
+        assert trunc_len > 0, f"All prompts too short for N={self.N}"
+
+        # 5) Truncate every prompt to exactly trunc_len
+        prompt_tokens = [toks[:trunc_len] for toks in prompt_tokens]
+
+        # 6) Build your tensor of shape (B, trunc_len) — no padding needed
+        B = len(prompt_tokens)
+        device = "cuda"  # or wherever your model lives
         tokens = torch.full((B, total_len), pad_id, dtype=torch.long, device="cuda")
         for k, prompt in enumerate(prompt_tokens):
             prompt_len = len(prompt)
-            # This is 0 if prompt_len is already a multiple of N.
-            extra_pad = (-prompt_len) % self.N
-            # prepad prompt tokens on the left to be multiples of N
-            new_prompt = [pad_id] * extra_pad + prompt
-            # Replace tokens tensor with prompt tokens
-            tokens[k, :len(new_prompt)] = torch.tensor(new_prompt, dtype=torch.long, device="cuda")
-
-        min_prompt_len = min(len(t) for t in prompt_tokens)
-        min_padded_len = ((min_prompt_len) // self.N + 1) * self.N
-
+            tokens[k, :len(prompt)] = torch.tensor(prompt, dtype=torch.long, device="cuda")
+            
         prev_pos = 0
         eos_reached = torch.tensor([False] * B, device="cuda")
         input_text_mask = tokens != pad_id
+        E = self.token_embed.weight
+        min_padded_len = ((trunc_len) // self.N) * self.N
 
         import numpy as np
         Xt_storage = {}
@@ -707,19 +719,17 @@ class TokenFlowModel(PreTrainedModel):
         for cur_pos in range(min_padded_len, total_len, self.N):
             Xt = self.embed_for_inference(tokens[:, prev_pos:cur_pos])
             block_idx = cur_pos // self.N
-            tracked_Xt = [] if block_idx in [50, 100, 150, 200] else None
+            tracked_Xt = [] if block_idx in [10, 20, 30, 40, 50] else None
 
             for i, (time, next_time) in enumerate(zip(time_schedule[:-1], time_schedule[1:])):
                 logits = self.forward(Xt, start_pos=prev_pos, time=time)["logits"]
-                # logits = self.forward(Xt, start_pos=0, time=time)["logits"]
                 if i == 0:
                     prev_pos = cur_pos
                     Xt = Xt[:, -self.N:]
 
                 probs = torch.softmax(logits[:, -self.N:], dim=-1)
-                # probs = nucleus_cutoff(probs, top_p) if top_p < 1 else probs
-
-                E = self.token_embed.weight
+                probs = nucleus_cutoff(probs, top_p) if top_p < 1 else probs
+                
                 X1t = torch.matmul(probs, E) # \Hat{X1} estimation at time t is exptectation of embedding vectors
                 alpha = (next_time - time) / (1 - time) # (t_{i+1} - t_i) / (1 - t_i)
                 Xt.lerp_(X1t, alpha)
@@ -731,19 +741,15 @@ class TokenFlowModel(PreTrainedModel):
                 Xt_storage[block_idx] = np.stack(tracked_Xt, axis=0)
                 print(f"Stored X_t evolution for block {block_idx}: shape {Xt_storage[block_idx].shape}")
 
-            X1_logits = self.forward(Xt, start_pos=prev_pos, time=0.9)["logits"]
+            B, N, d = Xt.shape
+            Xt_flat = Xt.reshape(-1, d)               # (B*N, d)
 
-            probs  = F.softmax(X1_logits, dim=-1)         # (B, N, V)
+            dist = torch.cdist(Xt_flat, E)         # default is p=2 (Euclidean)
 
-            B, N, V = probs.shape
-            probs_flat = probs.view(-1, V)             # (B*N, V)
-            probs_flat = nucleus_cutoff(probs_flat, top_p) if top_p < 1 else probs_flat
-
-            # draw one sample per row
-            samples_flat = torch.multinomial(probs_flat, num_samples=1)  # (B*N, 1)
+            closest = dist.argmin(dim=1)           # (B*N,)
 
             # reshape back to (B, N)
-            next_tokens = samples_flat.squeeze(-1).view(B, N)
+            next_tokens = closest.view(B, N)      
 
             next_tokens = torch.where(input_text_mask[:, cur_pos:cur_pos+self.N], tokens[:,cur_pos:cur_pos+self.N], next_tokens)
             tokens[:, cur_pos:cur_pos+self.N] = next_tokens
@@ -760,9 +766,8 @@ class TokenFlowModel(PreTrainedModel):
 
         out_tokens = []
         for i, toks in enumerate(tokens.tolist()):
-            # cut to max gen len
-            # start = 0 if echo else len(prompt_tokens[i])
-            # toks = toks[start: ctx_len]
+            start = 0 if echo else len(prompt_tokens[i])
+            toks = toks[start: total_len]
             if eos_id in toks:
                 eos_idx = toks.index(eos_id)
                 toks = toks[:eos_idx]

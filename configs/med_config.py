@@ -15,7 +15,7 @@ class MyConfig:
     per_device_train_batch_size = 24
     gradient_accumulation_steps = 5
     
-    dataloader_num_workers = 4
+    dataloader_num_workers = 8
     warmup_steps = 1000
     max_steps = 14000
     eval_steps = 2000

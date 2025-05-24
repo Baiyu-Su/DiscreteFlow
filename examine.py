@@ -6,6 +6,7 @@ import argparse
 from safetensors.torch import load_file
 
 import numpy as np
+from scipy.stats import beta
 from transformers import LlamaTokenizer
 from model import TokenFlowModel, TokenFlowConfig
 
@@ -34,7 +35,7 @@ def load_model(model_dir, device):
         vocab_size=32001,   # same as you used in training
         dim=1024,           # ...
         n_heads=16,
-        n_layers=12,
+        n_layers=16,
     )
 
     # 3) Create the model and load the weights
@@ -63,6 +64,7 @@ def main():
     tokenizer = LlamaTokenizer.from_pretrained("./.hf_llama")
     if tokenizer.pad_token is None:
         tokenizer.add_special_tokens({"pad_token": "<pad>"})
+    bos_id = tokenizer.bos_token_id
 
     # Load the custom TokenFlow model
     model = load_model(args.model_dir, device)
@@ -75,11 +77,19 @@ def main():
         raise ValueError("The JSON file must contain a list of prompt strings.")
 
     # Tokenize each prompt
-    prompt_tokens = [tokenizer.encode(prompt, add_special_tokens=False) for prompt in prompts]
+    raw_tokens = [
+        tokenizer.encode(p, add_special_tokens=False)
+        for p in prompts
+    ]
 
-    # Example time schedule (must start at 0 and end at 1)
-    time_schedule = (np.linspace(0, 0.9, 128)).tolist()
-    print(time_schedule)
+    # 3) Prepend BOS and collect lengths
+    prompt_tokens = [
+        [bos_id] + toks
+        for toks in raw_tokens
+    ]
+
+    # invert the Beta(2,6) CDF at those levels
+    time_schedule = np.linspace(0, 1., 128)
 
     print(f"pad_token_id: {tokenizer.pad_token_id}, eos_token_id: {tokenizer.eos_token_id}")
 

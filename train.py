@@ -1,6 +1,4 @@
 import os
-import json
-import multiprocessing
 from pathlib import Path
 
 import argparse
@@ -64,9 +62,9 @@ def main():
         tokenizer.add_special_tokens({"pad_token": "<pad>"})
 
     # your paths
-    CACHE_DIR  = "/scratch/10152/baiyusu/.hf/datasets"
-    DISK_TRAIN = "/scratch/10152/baiyusu/fineweb_10b/train.arrow"
-    DISK_VALID = "/scratch/10152/baiyusu/fineweb_10b/valid.arrow"
+    CACHE_DIR  = "/mnt/weka/home/lzchen/bscode/.hf/datasets"
+    DISK_TRAIN = "/mnt/weka/home/lzchen/bscode/fineweb_10b/train.arrow"
+    DISK_VALID = "/mnt/weka/home/lzchen/bscode/fineweb_10b/valid.arrow"
 
     # make sure parent exists
     Path(DISK_TRAIN).parent.mkdir(parents=True, exist_ok=True)
@@ -111,51 +109,8 @@ def main():
         num_proc=16,
         cache_file_name=DISK_VALID
     )
-
-    # example = train_data[0]
-
-    # # option A: view the dict‑keys
-    # print(example.keys())
-
-    # print(example["attention_mask"])  # attention mask is always present
-
-    # # option B: Hugging Face Datasets also exposes .column_names
-    # print(train_data.column_names)
-
-    # # option C: inspect the Feature spec
-    # print(train_data.features)
     
     data_collator = DataCollatorPretrainFlow(tokenizer=tokenizer, ctx_len=cfg.M*cfg.N, N=cfg.N)
-
-    # wrap your tokenized dataset in a DataLoader
-    train_loader = DataLoader(
-        train_data,
-        batch_size=4,                  # print 4 examples
-        shuffle=True,
-        collate_fn=data_collator,
-        num_workers=cfg.dataloader_num_workers,
-    )
-
-    # grab one batch
-    batch = next(iter(train_loader))
-    input_ids = batch["input_ids"]    # (4, ctx_len)
-    labels    = batch["labels"]       # (4, ctx_len)
-
-    # loop and decode
-    for i in range(input_ids.size(0)):
-        # full context (including padding)
-        tokens = input_ids[i].tolist()
-        decoded_input = tokenizer.decode(tokens, skip_special_tokens=False, clean_up_tokenization_spaces=True)
-
-        # only the real tokens (ignore -100 labels)
-        label_ids = [tok for tok in labels[i].tolist() if tok != -100]
-        decoded_labels = tokenizer.decode(label_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True)
-
-        print(f"--- Example {i} ---")
-        print("Input IDs  :", tokens)
-        print("\n Decoded in :", decoded_input)
-        print("\n Decoded lbl:", decoded_labels)
-        print()
 
     model_config = TokenFlowConfig(
         is_inference=False,
@@ -169,6 +124,7 @@ def main():
 
     model = TokenFlowModel(model_config)
     model = load_pretrained_embedding(cfg, model)
+
 
     training_args = TrainingArguments(
         output_dir=cfg.output_dir,
@@ -195,21 +151,51 @@ def main():
         dataloader_num_workers=cfg.dataloader_num_workers,
         dataloader_pin_memory=False,
         report_to="wandb",
+        torch_compile=True,
         ddp_find_unused_parameters=False,
         save_total_limit=3,
     )
     
     if training_args.process_index == 0:
-        os.makedirs(cfg.output_dir, exist_ok=True)
-        config_path = os.path.join(cfg.output_dir, "config.json")
-        with open(config_path, "w") as f:
-            json.dump(asdict(model_config), f, indent=2)
+        train_loader = DataLoader(
+            train_data,
+            batch_size=4,                  # print 4 examples
+            shuffle=True,
+            collate_fn=data_collator,
+            num_workers=cfg.dataloader_num_workers,
+        )
+
+        # grab one batch
+        batch = next(iter(train_loader))
+        input_ids = batch["input_ids"]    # (4, ctx_len)
+        labels    = batch["labels"]       # (4, ctx_len)
+
+        # loop and decode
+        for i in range(input_ids.size(0)):
+            # full context (including padding)
+            tokens = input_ids[i].tolist()
+            decoded_input = tokenizer.decode(tokens, skip_special_tokens=False, clean_up_tokenization_spaces=True)
+
+            # only the real tokens (ignore -100 labels)
+            label_ids = [tok for tok in labels[i].tolist() if tok != -100]
+            decoded_labels = tokenizer.decode(label_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True)
+
+            print(f"--- Example {i} ---")
+            print("Input IDs  :", tokens)
+            print("\n Decoded in :", decoded_input)
+            print("\n Decoded lbl:", decoded_labels)
+            print()
+        model_config.save_pretrained(cfg.output_dir)
+
+        api_key = os.getenv("WANDB_API_KEY")
+        if api_key:
+            wandb.login(key=api_key)
 
         wandb.init(
             project="TokenFlow",
             name=cfg.run_name,
         )
-        logger.info(f"Model Configuration:\n{pformat(asdict(model_config))}")
+        logger.info(f"Model Configuration:\n{pformat(model_config.to_dict())}")
         
         total_params = sum(p.numel() for p in model.parameters())
         embed_params = sum(p.numel() for p in model.token_embed.parameters())
