@@ -648,14 +648,14 @@ class TokenFlowModel(PreTrainedModel):
         flow_norms  = flow_norms.view(-1)
         ratio       = ratio.view(-1)
 
-        # 4) print summary stats
-        def stats(x, name):
-            print(f"time {time}, {name:12s} | mean {x.mean():.4f}  std {x.std():.4f}  "
-                f"min {x.min():.4f}  max {x.max():.4f}")
+        # # 4) print summary stats
+        # def stats(x, name):
+        #     print(f"time {time}, {name:12s} | mean {x.mean():.4f}  std {x.std():.4f}  "
+        #         f"min {x.min():.4f}  max {x.max():.4f}")
 
-        stats(model_norms, "Model ‖⋅‖₂")
-        stats(flow_norms,  "Flow  ‖⋅‖₂")
-        stats(ratio,       "Ratio flow/model")
+        # stats(model_norms, "Model ‖⋅‖₂")
+        # stats(flow_norms,  "Flow  ‖⋅‖₂")
+        # stats(ratio,       "Ratio flow/model")
         logits[:, -self.N:, :].sub_(flowlogits)
 
         return {"logits": logits}
