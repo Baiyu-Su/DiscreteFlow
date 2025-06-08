@@ -114,6 +114,7 @@ def main():
         learning_rate=cfg.learning_rate,
         adam_beta2=cfg.adam_beta2,
         weight_decay=cfg.weight_decay,
+        max_grad_norm=1.0,
         lr_scheduler_type=cfg.lr_scheduler_type,
         warmup_steps=cfg.warmup_steps,
         save_strategy="steps",

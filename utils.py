@@ -176,6 +176,54 @@ def build_training_block_mask(blk_num: int, blk_size: int, device=None):
         _compile=True,
     )
     
+
+def build_inference_block_mask(max_blk_num: int, blk_size: int, device=None):
+    """
+    Block‑triangular *BlockMask* for inference‑time FlexAttention.
+
+    Each block is completely visible to itself (bidirectional) **and** to
+    every block that comes **before** it, but **never** to a *later* block.
+    If only one block is present, the single block is therefore fully
+    bidirectional, as requested.
+
+    Args
+    ----
+    max_blk_num : int
+        Maximum number of blocks that may appear on the KV side at inference
+        (i.e. ⌈max_seq_len / blk_size⌉).  We build the mask once at this
+        upper bound so it can be reused.
+    blk_size    : int
+        Number of tokens per block.
+    device      : torch.device | str | None
+        GPU/CPU on which the mask will live.  Pass the device of `q`.
+
+    Returns
+    -------
+    BlockMask
+        Ready to be fed to `flex_attention`.
+    """
+
+    #––– predicate evaluated by `create_block_mask` ––––––––––––––––––––––
+    def mask_mod(b, h, q_idx, kv_idx):
+        # Block indices for the query token and the key/value token
+        q_blk = q_idx // blk_size
+        kv_blk = kv_idx // blk_size
+        # Allow iff the query’s block is *not earlier* than the KV’s block
+        return q_blk >= kv_blk
+
+    total_tokens = max_blk_num * blk_size        # square mask (Q = KV)
+
+    return create_block_mask(
+        mask_mod,
+        B=None,                                  # batch‑/head‑agnostic
+        H=None,
+        Q_LEN=total_tokens,
+        KV_LEN=total_tokens,
+        device=device,
+        BLOCK_SIZE=blk_size,
+        _compile=True,
+    )
+    
     
 def rectified_flow_interpolate(x0, x1, t):
     xt = t * x1 + (1 - t) * x0
@@ -209,7 +257,7 @@ def nucleus_cutoff(probs: torch.Tensor, p: float) -> torch.Tensor:
     return probs_new
 
 
-def build_time_tensor(time: float, seq_len: int, B: int, N: int) -> torch.Tensor:
+def build_inference_time(time: float, seq_len: int, B: int, N: int) -> torch.Tensor:
     """
     Create a time tensor based on the sequence length and time value.
 

@@ -1,126 +1,115 @@
+"""examine.py — unconditional sampler for a trained TokenFlow model
+
+Usage
+-----
+$ python examine.py \
+    --ckpt_dir ./out_med \
+    --tokenizer_dir ./.hf_llama \
+    --batch_size 8
+
+The script loads the model checkpoint produced by the Hugging Face Trainer
+(see train.py), rebuilds the same tokenizer that was used during training,
+and then performs **unconditional** generation using `model.generate()`.
+The decoded text of each sample is printed to stdout so you can visually
+inspect the quality.
+"""
+
 import os
-import json
-import torch
 import argparse
 from pathlib import Path
 
-from safetensors.torch import load_file
-
-from torch.utils.data import Dataset
-from datasets import load_dataset
-
 import numpy as np
-from scipy.stats import beta
+import torch
+from safetensors.torch import load_file
 from transformers import LlamaTokenizer
-from loguru import logger
-from char_bkup.model import TokenFlowModel, TokenFlowConfig
+from model import TokenFlowConfig
 
-# torchrun --standalone examine.py --model_dir out_med --prompt_file prompts.json
-
-def build_vocab(text: str):
-    """Return char→id and id→char dictionaries (0-based)."""
-    vocab = sorted(set(text))
-    stoi = {ch: i for i, ch in enumerate(vocab)}
-    itos = {i: ch for ch, i in stoi.items()}
-    return stoi, itos
+# -----------------------------------------------------------------------------
+# Import your model definition.  We assume model.py is on the PYTHONPATH.
+# -----------------------------------------------------------------------------
+from model import TokenFlowModel  # noqa: E402
 
 
-def encode(text: str, stoi: dict[int, str]):
-    return [stoi[c] for c in text]
+def parse_args():
+    """CLI helper."""
+    parser = argparse.ArgumentParser(description="Unconditional text generation with TokenFlow")
+    parser.add_argument(
+        "--ckpt_dir",
+        type=Path,
+        default=Path("./out_med"),
+        help="Directory that contains the `pytorch_model.bin` and `config.json` saved by the Trainer",
+    )
+    parser.add_argument(
+        "--tokenizer_dir",
+        type=Path,
+        default=Path("./.hf_llama"),
+        help="Directory where the Llama tokenizer JSON / sentencepiece model lives (same as training).",
+    )
+    parser.add_argument("--batch_size", type=int, default=8, help="Number of unconditional sequences to sample")
+    parser.add_argument(
+        "--device",
+        type=str,
+        choices=["cpu", "cuda", "mps"],
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Computation device",
+    )
+    return parser.parse_args()
 
 
-def decode(ids: list[int], itos: dict[int, str]):
-    return ''.join(itos[i] for i in ids)
+def main() -> None:
+    args = parse_args()
 
-def load_model(model_dir, config, device):
-    """
-    Loads the saved model weights from model.safetensors and creates
-    a TokenFlowModel with the same hyperparameters used during training.
-    """
+    # ------------------------------------------------------------------
+    # Tokenizer: must be identical to the one used in train.py
+    # ------------------------------------------------------------------
+    tokenizer = LlamaTokenizer.from_pretrained(args.tokenizer_dir)
+    tokenizer.padding_side = "right"
+    
+    model_config = TokenFlowConfig(
+        blk_num = 8,
+        blk_size = 128,            # <-- change to match your training
+        vocab_size=32000,   # same as you used in training
+        dim=1024,           # ...
+        n_heads=16,
+        n_layers=16,
+    )
 
-    # 1) Load state_dict from "model.safetensors"
-    model_weights_path = os.path.join(model_dir, "model.safetensors")
+    # ------------------------------------------------------------------
+    # Load model from HF‑style checkpoint directory.
+    # ------------------------------------------------------------------
+    model_weights_path = os.path.join(args.ckpt_dir, "model.safetensors")
     if not os.path.exists(model_weights_path):
         raise FileNotFoundError(f"Could not find {model_weights_path}")
 
     state_dict = load_file(model_weights_path)
-
-    # 3) Create the model and load the weights
-    model = TokenFlowModel(config)
+    print(f"Loading TokenFlow model from {args.ckpt_dir.resolve()}")
+    model = TokenFlowModel(model_config)
     model.load_state_dict(state_dict)
-    model.to(device)
+    model.to("cuda")
     model.eval()
-
-    return model
-
-
-class ShakespeareCharDataset(Dataset):
-    def __init__(self, enc_text: list[int], block_size: int):
-        self.block_size = block_size
-        self.data = enc_text
-
-    def __len__(self):
-        # leave one extra char so every label has a next-char target
-        return len(self.data) - self.block_size
-
-    def __getitem__(self, idx):
-        chunk = self.data[idx : idx + self.block_size]  # +1 for label shift
-        x = torch.tensor(chunk, dtype=torch.long)
-        y = torch.tensor(chunk,  dtype=torch.long)
-        return {"input_ids": x, "labels": y}
-
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Examine the generation quality of the trained TokenFlow model.")
-    parser.add_argument("--model_dir", type=str, required=True, 
-                        help="Directory containing the saved model.safetensors and trainer_state.json.")
-    args = parser.parse_args()
-
-    # Determine device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if device.type != "cuda":
-        print("Warning: GPU not available. The generate function may assume CUDA and could error.")
-
-    raw = load_dataset("tiny_shakespeare", split="train", trust_remote_code=True)
-    full_text = "\n".join(raw["text"])
-    stoi, itos = build_vocab(full_text)
-    vocab_size = len(stoi)
     
-    enc_text = encode(full_text, stoi)
-    train_ds = ShakespeareCharDataset(enc_text, 256)
-    
-    sample_text = decode(train_ds[0]["input_ids"][:120].tolist(), itos)
-    logger.info("Sample: " + sample_text)
+    time_schedule = np.linspace(0, 1., 128)
 
+    # ------------------------------------------------------------------
+    # Perform unconditional generation.
+    # ------------------------------------------------------------------
+    with torch.inference_mode():
+        samples = model.generate(
+            batch_size=args.batch_size,
+            time_schedule=time_schedule,
+            bos_id=tokenizer.bos_token_id,
+            eos_id=tokenizer.eos_token_id,
+        )
 
-    # Load the custom TokenFlow model
-    model_config = TokenFlowConfig(
-        is_inference=True,  # we want inference mode
-        M=1,                # <-- change to match your training
-        N=256,              # <-- change to match your training
-        vocab_size=vocab_size,   # same as you used in training
-        dim=384,           # ...
-        n_heads=6,
-        n_layers=6,
-    )
-    model = load_model(args.model_dir, model_config, device)
-
-    # invert the Beta(2,6) CDF at those levels
-    time_schedule = np.linspace(0, 0.99, 256)
-
-    completions_tokens = model.generate(time_schedule=time_schedule)
-
-    completions = []
-    for tokens in completions_tokens:
-        completion = decode(tokens, itos)
-        completions.append(completion)
-
-    # Print results
-    for completion in completions:
-        print("\nCompletion:")
-        print(completion)
-        print("-" * 80)
+    # ------------------------------------------------------------------
+    # Decode and print each sequence so a human can inspect them.
+    # ------------------------------------------------------------------
+    print("\n================= Generated Samples =================\n")
+    for idx, token_ids in enumerate(samples):
+        text = tokenizer.decode(token_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+        print(f"--- Sample {idx + 1} (length={len(token_ids)} tokens) ---")
+        print(text)
+        print()
 
 
 if __name__ == "__main__":

@@ -18,10 +18,10 @@ from utils import (
     precompute_freqs_cis,
     apply_rotary_emb,
     build_training_block_mask,
+    build_inference_block_mask,
     timestep_embedding,
     rectified_flow_interpolate,
-    nucleus_cutoff,
-    build_time_tensor,
+    build_inference_time
 )
 
 
@@ -39,6 +39,7 @@ class TokenFlowConfig(PretrainedConfig):
         n_heads: int = 16,
         n_kv_heads: Optional[int] = None,
         n_layers: int = 12,
+        tied_embedding = True,
         rope_scaling: int = 10000,
         multiple_of: int = 256,
         norm_eps: float = 1e-6,
@@ -46,18 +47,19 @@ class TokenFlowConfig(PretrainedConfig):
     ):
         super().__init__(**kwargs)
 
-        self.blk_num      = blk_num
-        self.blk_size     = blk_size
-        self.max_batch    = max_batch
-        self.vocab_size   = vocab_size
-        self.dim          = dim
-        self.time_dim     = time_dim
-        self.n_heads      = n_heads
-        self.n_kv_heads   = n_kv_heads or n_heads
-        self.n_layers     = n_layers
+        self.blk_num = blk_num
+        self.blk_size = blk_size
+        self.max_batch = max_batch
+        self.vocab_size = vocab_size
+        self.dim = dim
+        self.time_dim = time_dim
+        self.n_heads = n_heads
+        self.n_kv_heads = n_kv_heads or n_heads
+        self.n_layers = n_layers
+        self.tied_embedding = tied_embedding
         self.rope_scaling = rope_scaling
-        self.multiple_of  = multiple_of
-        self.norm_eps     = norm_eps
+        self.multiple_of = multiple_of
+        self.norm_eps = norm_eps
 
 
 class RMSNorm(nn.Module):
@@ -174,13 +176,10 @@ class Attention(nn.Module):
         self.wv = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(config.n_heads * self.head_dim, config.dim, bias=False)
 
-        if self.training:
-            self._block_mask_cache: dict[torch.device, "BlockMask"] = {}
-        else:
-            max_len = config.blk_num * config.blk_size
-            shape   = (config.max_batch, max_len, self.n_kv_heads, self.head_dim)
-            self.register_buffer("cache_k", torch.zeros(shape, device="cuda"), persistent=False)
-            self.register_buffer("cache_v", torch.zeros_like(self.cache_k),    persistent=False)
+        self._block_mask_cache: dict[torch.device, "BlockMask"] = {}
+        
+        self.register_buffer("cache_k", torch.empty(0), persistent=False)
+        self.register_buffer("cache_v", torch.empty(0), persistent=False)
 
     def forward(self, x: Tensor, start_pos: int, freqs_cis):
         """
@@ -223,6 +222,13 @@ class Attention(nn.Module):
             )        
         else:
             end_pos = start_pos + seq_len
+            
+            if self.cache_k.numel() == 0 or self.cache_k.size(1) < end_pos:
+                max_len = self.blk_num * self.blk_size
+                shape   = (self.blk_size, max_len, self.n_kv_heads, self.head_dim)
+                self.cache_k = torch.zeros(shape, device=x.device, dtype=k.dtype)
+                self.cache_v = torch.zeros_like(self.cache_k)
+                
             self.cache_k[:batch_size, start_pos:end_pos] = k
             self.cache_v[:batch_size, start_pos:end_pos] = v
 
@@ -232,10 +238,17 @@ class Attention(nn.Module):
             q = q.transpose(1, 2)                    # (B, H_q, L,  D_h)
             k = k_full.transpose(1, 2)               # (B, H_kv,T, D_h)
             v = v_full.transpose(1, 2)
+            
+            dev = q.device                                     # q/k/v's GPU
+            if dev not in self._block_mask_cache:              # NEW
+                self._block_mask_cache[dev] = build_inference_block_mask(
+                    self.blk_num, self.blk_size, device=dev
+                )
+            block_mask = self._block_mask_cache[dev] 
 
             out = flex_attention(
                 q, k, v,
-                block_mask=None,                     # causal via cache
+                block_mask=block_mask._adjust(q.shape[-2], k.shape[-2]),                     # causal via cache
                 scale=1.0 / math.sqrt(self.head_dim),
                 enable_gqa=(self.n_kv_heads != self.n_heads),
             )
@@ -299,7 +312,7 @@ class NormalizedEmbedding(nn.Embedding):
                          scale_grad_by_freq=scale_grad_by_freq,
                          sparse=sparse,
                          padding_idx=padding_idx)
-        self.eps = eps                            # for numerical stability
+        self.eps = eps
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:          # type: ignore[override]
         weight_norm = F.normalize(self.weight, p=2, dim=1, eps=self.eps)
@@ -442,24 +455,6 @@ class TokenFlowModel(PreTrainedModel):
             self.dim//self.n_heads, self.blk_num*self.blk_size, config.rope_scaling)
         self.register_buffer("freqs_cis", freqs_cis, persistent=False)
     
-    # def embed_for_inference(self, input_ids: torch.Tensor) -> torch.Tensor:
-    #     """
-    #     Embeds clean input tokens and appends random noise embeddings.
-    #     Args:
-    #         input_ids (torch.Tensor): Tensor of shape (B, seq_len) containing token indices.
-    #         token_embed (nn.Module): Embedding module (e.g., nn.Embedding) that converts token indices to embeddings.
-    #         N (int): Generation block size.
-    #     Returns:
-    #         torch.Tensor: Concatenated tensor of shape (B, seq_len+N, dim) where dim is the embedding dimension.
-    #     """
-    #     embedded_tokens = self.token_embed(input_ids) #(B, seqlen, dim)
-    #     B, _, dim = embedded_tokens.shape
-
-    #     X0 = 0.0367 * torch.randn(B, self.N, dim, device=input_ids.device)
-    #     combined_embeddings = torch.cat((embedded_tokens, X0), dim=1) # (B, seqlen+N, dim)
-
-    #     return combined_embeddings
-    
     
     def _rope_cache(self, device):
         if (not hasattr(self, "_freqs_cis") or self._freqs_cis.device != device):
@@ -471,7 +466,8 @@ class TokenFlowModel(PreTrainedModel):
             self.register_buffer("_freqs_cis", freqs_cis, persistent=False)
         return self._freqs_cis
     
-    @torch._dynamo.disable            # ← 1️⃣  keep Beta.sample() out of graph
+    
+    @torch._dynamo.disable
     def _sample_time(self, shape, device):
         return self.beta_dist.sample(shape).to(device)
     
@@ -515,10 +511,10 @@ class TokenFlowModel(PreTrainedModel):
         Returns:
             dict: Output logits and loss (if in training mode).
         """
-        if self.training:
+        if labels is not None:
             return self.training_forward(input_ids, labels)
-        else:
-            return self.inference_forward(input_ids, start_pos, time)
+
+        return self.inference_forward(input_ids, start_pos, time, **kwargs)
         
 
     def training_forward(self, input_ids: torch.Tensor, labels: torch.Tensor):
@@ -541,9 +537,9 @@ class TokenFlowModel(PreTrainedModel):
         x0 = torch.randn_like(x1) / math.sqrt(self.dim)
         t_sample = self._sample_time((batch_size, self.blk_num), input_ids.device)
         t_all = torch.cat([torch.ones_like(t_sample), t_sample], dim=1)
-        t = t_sample.repeat_interleave(self.blk_size, dim=1).unsqueeze(-1)
+        t_full = t_sample.repeat_interleave(self.blk_size, dim=1).unsqueeze(-1)
         
-        x_all = rectified_flow_interpolate(x0, x1, t)
+        x_all = rectified_flow_interpolate(x0, x1, t_full)
         t_vec = self.time_embed(timestep_embedding(t_all, self.time_dim))
         xt = x_all[:, -self.blk_num * self.blk_size:]
         h = self.scale(x_all)
@@ -558,7 +554,7 @@ class TokenFlowModel(PreTrainedModel):
         h = self.final_layer_norm(h)
         model_logits = self.output_proj(h)
         
-        singular_logits = self._compute_singular_logits(xt, t)
+        singular_logits = self._compute_singular_logits(xt, t_full)
         logits = model_logits + singular_logits
         
         loss = F.cross_entropy(
@@ -575,7 +571,7 @@ class TokenFlowModel(PreTrainedModel):
         
 
     @torch.inference_mode()
-    def inference_forward(self, h: torch.Tensor, start_pos: int, time: float):
+    def inference_forward(self, x_all: torch.Tensor, start_pos: int, time: float):
         """
         Forward pass for inference mode.
         Args:   
@@ -585,41 +581,110 @@ class TokenFlowModel(PreTrainedModel):
         Returns:    
             dict: Output logits.
         """
-        # B, seq_len, _ = h.shape
-        # assert seq_len % self.N == 0, f"Sequence length {seq_len} is not a multiple of block size {self.N}"
-        # assert start_pos is not None, "Inference mode requires start_pos."
-        # assert time is not None, "Inference mode requires time."
+        batch_size, seq_len = x_all.shape[0], x_all.shape[1]
+        assert seq_len % self.blk_size == 0, f"Sequence length {seq_len} is not a multiple of block size {self.N}"
+        assert start_pos is not None, "Inference mode requires start_pos."
+        assert time is not None, "Inference mode requires time."
 
-        # self.freqs_cis = self.freqs_cis.to(h.device)
-        # time_tensor = build_time_tensor(time, seq_len, B, self.N).to(h.device)
-        # t_vec = self.time_embed(timestep_embedding(time_tensor, self.time_dim))
+        freqs_cis = self._rope_cache(x_all.device)
+        freqs_cis = freqs_cis[start_pos: start_pos + seq_len]
+        t_all = build_inference_time(time, seq_len, batch_size, self.blk_size).to(x_all.device)
+        t_vec = self.time_embed(timestep_embedding(t_all, self.time_dim))
+        t_full = torch.full((batch_size, self.blk_size), time, device=x_all.device).unsqueeze(-1)
 
-        # freqs_cis = self.freqs_cis[start_pos: start_pos + seq_len]
-        # mask = build_inference_mask(start_pos, seq_len, self.N).to(h.device)
+        xt = x_all[:, -self.blk_size:]
+        h = self.scale(x_all)
 
-        # xt = h[:, -self.N:, :].detach().clone()
+        for layer in self.layers:
+            h = layer(h, t_vec, start_pos, freqs_cis)
+        
+        h = h[:, -self.blk_size:]
+        h = self.final_layer_norm(h)
+        model_logits = self.output_proj(h)
+        
+        singular_logits = self._compute_singular_logits(xt, t_full)
+        logits = model_logits + singular_logits
 
-        # for layer in self.layers:
-        #     h = layer(h, t_vec, start_pos, freqs_cis, mask)
+        return {"logits": logits}
+    
+    
+    @torch.inference_mode()
+    def generate(
+        self,
+        batch_size: int,
+        time_schedule: List[float],
+        bos_id: int = 1,
+        eos_id: int = 1,
+    ) -> Tuple[List[List[int]]]:
+        """
+        Generate text sequences based on provided prompts using the language generation model.
 
-        # h = self.final_layer_norm(h)
-        # logits = self.output_proj(h)
+        Args:
+            time_schedule (List[float]): List of time steps for the generation process. Must start with 0 and end with 1.
+            top_p (float, optional): Top-p probability threshold for nucleus sampling. Defaults to 1.0 (switched off).
+            echo (bool, optional): Flag indicating whether to include prompt tokens in the generated output. Defaults to False.
+        Returns:
+            Tuple[List[List[int]]: A tuple containing generated token sequences.
 
-        # t_full = time_tensor[:, -1].reshape(-1, 1, 1)
-        # t_full = t_full.expand(-1, self.N, -1)  #
+        Note:
+            This method uses the provided prompts as a basis for generating text. It employs nucleus sampling to produce text with controlled randomness.
+        """
+        assert batch_size <= self.max_batch, f"Generation batch size {batch_size} greater than batch size limit {self.max_batch}."
+        assert all(0 <= x <= 1 for x in time_schedule), "Time steps must between 0 and 1."
+        total_len = self.blk_num * self.blk_size
 
-        # constraint_logits = self.compute_flow_logits(xt, t_full)
-        # logits[:, -self.N:, :].sub_(constraint_logits)
+        device = self.token_embed.weight.device
+        tokens = torch.full((batch_size, total_len), bos_id, dtype=torch.long, device=device)
+        
+        eos_reached = torch.zeros(batch_size, dtype=torch.bool, device=device)
 
-        # return {"logits": logits}
-        return None
+        prev_pos = 0
+        for cur_pos in range(0, total_len, self.blk_size):
+            x_all = torch.randn(batch_size, self.blk_size, self.dim, device=device) / math.sqrt(self.dim)
+            if cur_pos - prev_pos > 0:
+                x1 = self.token_embed(tokens[:, prev_pos:cur_pos])
+                x_all = torch.cat([x1, x_all], dim=1)
+
+            for i, (time, next_time) in enumerate(zip(time_schedule[:-1], time_schedule[1:])):
+                logits = self.forward(x_all, start_pos=prev_pos, time=time)["logits"]
+                if i == 0:
+                    prev_pos = cur_pos
+                    x_all = x_all[:, -self.blk_size:]
+
+                E = self.token_embed.weight
+                probs = torch.softmax(logits[:, -self.blk_size:], dim=-1)
+                x1t = torch.matmul(probs, E) # \Hat{X1} estimation at time t is exptectation of embedding vectors
+                alpha = (next_time - time) / (1 - time) # (t_{i+1} - t_i) / (1 - t_i)
+                x_all.lerp_(x1t, alpha)
+                
+            x1_flat = x_all.reshape(-1, self.dim)               # (B*N, d)
+
+            dist = torch.cdist(x1_flat, E)         # default is p=2 (Euclidean)
+            closest = dist.argmin(dim=1)           # (B*N,)
+            next_tokens = closest.view(batch_size, self.blk_size)     
+            tokens[:, cur_pos:cur_pos+self.blk_size] = next_tokens
+
+            eos_in_block = (next_tokens == eos_id).any(dim=1)
+            eos_reached |= eos_in_block
+
+            if all(eos_reached):
+                break
+
+        out_tokens = []
+        for i, toks in enumerate(tokens.tolist()):
+            if eos_id in toks:
+                eos_idx = toks.index(eos_id)
+                toks = toks[:eos_idx]
+            out_tokens.append(toks)
+
+        return out_tokens
+    
 
     # @torch.inference_mode()
     # def generate(
     #     self,
     #     prompt_tokens: List[List[int]],
     #     time_schedule: List[float],
-    #     top_p: float = 1.0,
     #     echo: bool = False,
     #     pad_id: int = 0,
     #     eos_id: int = 1,
@@ -638,8 +703,8 @@ class TokenFlowModel(PreTrainedModel):
     #     Note:
     #         This method uses the provided prompts as a basis for generating text. It employs nucleus sampling to produce text with controlled randomness.
     #     """
-    #     B = len(prompt_tokens)
-    #     assert B <= self.max_B, f"Batch size {B} exceeds maximum batch size {self.max_B}."
+    #     batch_size = len(prompt_tokens)
+    #     assert batch_size <= self.max_batch, f"Batch size {batch_size} exceeds maximum batch size {self.max_batch}."
     #     assert all(0 <= x <= 1 for x in time_schedule), "Time steps must between 0 and 1."
     #     total_len = self.blk_num * self.blk_size
 
@@ -681,7 +746,6 @@ class TokenFlowModel(PreTrainedModel):
     #                 Xt = Xt[:, -self.N:]
 
     #             probs = torch.softmax(logits[:, -self.N:], dim=-1)
-    #             probs = nucleus_cutoff(probs, top_p) if top_p < 1 else probs
                 
     #             X1t = torch.matmul(probs, E) # \Hat{X1} estimation at time t is exptectation of embedding vectors
     #             alpha = (next_time - time) / (1 - time) # (t_{i+1} - t_i) / (1 - t_i)
@@ -730,3 +794,5 @@ class TokenFlowModel(PreTrainedModel):
     #     np.save('Xt_storage.npy', Xt_storage)
     #     print("Saved X_t evolution data to 'Xt_storage.npy'.")
     #     return out_tokens
+    
+    
