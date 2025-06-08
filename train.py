@@ -10,7 +10,6 @@ from transformers import (
     LlamaTokenizer,
     TrainingArguments,
     Trainer,
-    AutoModel,
 )
 import torch
 import torch.nn as nn
@@ -18,26 +17,9 @@ import torch.nn as nn
 from datasets import load_dataset
 from loguru import logger
 from pprint import pformat
-from dataclasses import asdict
 
 from model import TokenFlowModel, TokenFlowConfig
 from dataloader import DataCollatorPretrainFlow
-
-
-def load_pretrained_embedding(cfg, model):
-    base_model = AutoModel.from_pretrained(
-        cfg.llama_checkpoint,
-        trust_remote_code=True,
-        device_map="cpu"  # load on CPU to avoid GPU memory spike
-    )
-    pretrained_token_embedding = base_model.get_input_embeddings()
-    with torch.no_grad():
-        model.token_embed.weight[:32000, :] = pretrained_token_embedding.weight[:32000, :]
-        nn.init.normal_(model.token_embed.weight[32000, :], mean=0.0, std=0.02)
-
-    del base_model
-    del pretrained_token_embedding
-    return model
 
 
 def main():
@@ -58,8 +40,6 @@ def main():
     cfg = config_module.MyConfig
     
     tokenizer = LlamaTokenizer.from_pretrained("./.hf_llama")
-    if tokenizer.pad_token is None:
-        tokenizer.add_special_tokens({"pad_token": "<pad>"})
 
     # your paths
     CACHE_DIR  = "/mnt/weka/home/lzchen/bscode/.hf/datasets"
@@ -110,29 +90,26 @@ def main():
         cache_file_name=DISK_VALID
     )
     
-    data_collator = DataCollatorPretrainFlow(tokenizer=tokenizer, ctx_len=cfg.M*cfg.N, N=cfg.N)
+    data_collator = DataCollatorPretrainFlow(tokenizer=tokenizer, ctx_len=cfg.blk_num*cfg.blk_size, blk_size=cfg.blk_size)
 
     model_config = TokenFlowConfig(
-        is_inference=False,
-        M=cfg.M,
-        N=cfg.N,
-        vocab_size=32001,
+        blk_num=cfg.blk_num,
+        blk_size=cfg.blk_size,
+        vocab_size=cfg.vocab_size,
         dim=cfg.dim,
         n_heads=cfg.n_heads,
         n_layers=cfg.n_layers,
     )
 
     model = TokenFlowModel(model_config)
-    model = load_pretrained_embedding(cfg, model)
-
 
     training_args = TrainingArguments(
         output_dir=cfg.output_dir,
         overwrite_output_dir=True,
         do_train=True,
         do_eval=False,
-        eval_strategy="steps",
-        eval_steps=cfg.eval_steps,
+        # eval_strategy="steps",
+        # eval_steps=cfg.eval_steps,
         bf16=True,
         learning_rate=cfg.learning_rate,
         adam_beta2=cfg.adam_beta2,
@@ -225,5 +202,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 
