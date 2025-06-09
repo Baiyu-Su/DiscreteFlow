@@ -2,7 +2,7 @@ class MyConfig:
     blk_num = 8
     blk_size = 128
 
-    output_dir = "./out_small_norescale"
+    output_dir = "./out_small_notie"
     run_name = "small_run"
     load_stats = True
 
@@ -11,10 +11,10 @@ class MyConfig:
     dim = 768
     n_heads = 6 # Head dim must be divisible by 128
     n_layers = 12
-    tie_word_embeddings = True
+    tie_word_embeddings = False
     
     per_device_train_batch_size = 40
-    gradient_accumulation_steps = 4
+    gradient_accumulation_steps = 8
     
     dataloader_num_workers = 8
     max_steps = 16000

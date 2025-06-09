@@ -69,9 +69,10 @@ def main() -> None:
         blk_num = 8,
         blk_size = 128,            # <-- change to match your training
         vocab_size=32000,   # same as you used in training
-        dim=1024,           # ...
-        n_heads=16,
-        n_layers=16,
+        dim=768,           # ...
+        n_heads=6,
+        n_layers=12,
+        tie_word_embeddings=True
     )
 
     # ------------------------------------------------------------------
@@ -84,11 +85,13 @@ def main() -> None:
     state_dict = load_file(model_weights_path)
     print(f"Loading TokenFlow model from {args.ckpt_dir.resolve()}")
     model = TokenFlowModel(model_config)
-    model.load_state_dict(state_dict)
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    if hasattr(model, "tie_weights"):
+        model.tie_weights() 
     model.to("cuda")
     model.eval()
     
-    time_schedule = np.linspace(0, 1., 128)
+    time_schedule = np.linspace(0, 1., 1024)
 
     # ------------------------------------------------------------------
     # Perform unconditional generation.

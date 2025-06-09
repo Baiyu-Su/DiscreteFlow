@@ -116,7 +116,6 @@ def main():
         num_proc=16,
         cache_file_name=DISK_TRAIN
     )
-
     validation_data = valid_raw.map(
         tokenize_function,
         batched=True,
@@ -124,7 +123,6 @@ def main():
         num_proc=16,
         cache_file_name=DISK_VALID
     )
-    
     data_collator = DataCollatorPretrainFlow(tokenizer=tokenizer, ctx_len=cfg.blk_num*cfg.blk_size, blk_size=cfg.blk_size)
 
     model_config = TokenFlowConfig(
