@@ -1,38 +1,20 @@
 #!/bin/bash
-#SBATCH -J NAMD
-#SBATCH -p gh
-#SBATCH -t 24:00:00
-#SBATCH --nodes=8                # Number of nodes
-#SBATCH --ntasks-per-node=1
-#SBATCH -o logs/flow_train.o%j  # Output file
-#SBATCH -e logs/flow_train.e%j   # Error file
+#SBATCH -J olmo
+#SBATCH -t 20:00:00
+#SBATCH --nodes=1
+#SBATCH --gres=gpu:8        # Request 8 GPUs on the node
+#SBATCH --ntasks-per-node=8                  # 1 task per GPU
+#SBATCH --cpus-per-task=12                   # 96 / 8 = 12 CPUs per task
+#SBATCH -o logs/flow.o%j
+#SBATCH -e logs/flow.e%j
 
 source ~/.bashrc
-conda deactivate
-cd /scratch/10152/baiyusu/DiscreteFlow
-conda activate flowenv
+conda activate olmoenv
+cd /mnt/weka/home/lzchen/bscode/DiscreteFlow
 
-MASTER_ADDR=$(scontrol show hostname $SLURM_NODELIST | head -n1)
-MASTER_PORT=$((10000 + $RANDOM % 50000))  # pick a random free port
+export WANDB_API_KEY=a95d91ca9178e628b73ef33438d5a81306701c3b
 
-export NCCL_IB_DISABLE=0
-NODE_RANK=$SLURM_NODEID
-GPUS_PER_NODE=1
-
-# NCCL settings
-export NCCL_DEBUG=INFO
-
-export TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor_cache_${SLURM_PROCID}
-
-# Not using distributed training for debug
-srun python -u -m torch.distributed.run \
-    --nproc_per_node=$GPUS_PER_NODE \
-    --nnodes=$SLURM_NNODES \
-    --rdzv_id=$SLURM_JOB_ID \
-    --rdzv_backend=c10d \
-    --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
-    --node_rank=$NODE_RANK \
-    --master_addr=$MASTER_ADDR \
-    --master_port=$MASTER_PORT \
-    train.py \
-    --config configs/small_config.py
+/mnt/weka/home/lzchen/miniconda3/envs/olmoenv/bin/python -u -m torch.distributed.run \
+    --nproc_per_node 8 \
+    --nnodes 1 \
+    train.py --config configs/small_config.py

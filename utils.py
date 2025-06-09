@@ -288,3 +288,8 @@ def build_inference_time(time: float, seq_len: int, B: int, N: int) -> torch.Ten
             torch.tensor([time], dtype=torch.float)
         ])
         return row.unsqueeze(0).repeat(B, 1)
+    
+
+def row_rms(w: torch.Tensor, eps: float) -> torch.Tensor:
+    """Compute per‑row RMS with numerical epsilon."""
+    return w.pow(2).mean(dim=1, keepdim=True).add(eps).sqrt()

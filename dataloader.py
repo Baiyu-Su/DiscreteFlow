@@ -17,6 +17,7 @@ class DataCollatorPretrainFlow:
     """
 
     def __init__(self, tokenizer, ctx_len: int, blk_size: int):
+        self.bos_token_id = tokenizer.bos_token_id
         self.eos_token_id = tokenizer.eos_token_id
         self.ctx_len      = ctx_len
         self.blk_size     = blk_size
@@ -39,22 +40,18 @@ class DataCollatorPretrainFlow:
             ids = feat["input_ids"]
             if not isinstance(ids, torch.Tensor):
                 ids = torch.tensor(ids, dtype=torch.long)
+                
+            if ids.numel() > 0 and ids[0].item() == self.bos_token_id:
+                ids = ids[1:]
 
-            # 2) cache *raw* length (before padding/truncation)
-            raw_len = min(ids.size(0), self.ctx_len)
+            ids = self._right_pad(ids)
 
-            # 3) force to fixed ctx_len
-            ids = self._right_pad(ids)                      # shape = (ctx_len,)
-
-            # 4) create labels = ids (no shift)
             labels = ids.clone()
 
-            # 5) mask labels after the block that contains first padded EOS
-            if raw_len < self.ctx_len:                      # there *is* padding
-                pad_block_id   = raw_len // self.blk_size   # 0‑based block index
-                next_block_beg = (pad_block_id + 1) * self.blk_size
-                if next_block_beg < self.ctx_len:
-                    labels[next_block_beg:] = -100          # disable loss
+            eos_mask = labels == self.eos_token_id
+            if eos_mask.any():
+                first_eos = eos_mask.nonzero(as_tuple=True)[0][0].item()
+                labels[first_eos + 1 :] = -100
 
             batch_input_ids.append(ids)
             batch_labels.append(labels)

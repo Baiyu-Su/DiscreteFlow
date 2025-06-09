@@ -10,6 +10,7 @@ from transformers import (
     LlamaTokenizer,
     TrainingArguments,
     Trainer,
+    TrainerCallback
 )
 import torch
 import torch.nn as nn
@@ -18,8 +19,42 @@ from datasets import load_dataset
 from loguru import logger
 from pprint import pformat
 
-from model import TokenFlowModel, TokenFlowConfig
+from model import TokenFlowModel, TokenFlowConfig, RMSNorm   
 from dataloader import DataCollatorPretrainFlow
+
+
+class StatsLoggingCallback(TrainerCallback):
+    """
+    Logs, every logging step:
+      • RMS & max‑abs of every nn.LayerNorm / RMSNorm weight (layernorms/…)
+      • RMS & max‑abs of model_logits & singular_logits (logits/…)
+    """
+    def __init__(self, model):
+        self.model = model            # keep a handle to the live model
+
+    # ----------------------------------------------
+    def on_step_end(self, args, state, control, **kwargs):
+        # respect logging cadence and log only on the main process
+        if not control.should_log or args.process_index != 0:
+            return
+
+        logs = {}
+
+        # ── 1. logits stats saved by TokenFlowModel.training_forward ────────
+        extra = getattr(self.model, "_logits_stats", None)
+        if extra is not None:
+            logs.update(extra)
+
+        # ── 2. layer‑norm weight stats ─────────────────────────────────────
+        for name, module in self.model.named_modules():
+            if isinstance(module, (nn.LayerNorm, RMSNorm)):
+                w = module.weight.data
+                logs[f"layernorms/{name}_rms"] = w.pow(2).mean().sqrt().item()
+                logs[f"layernorms/{name}_max"] = w.abs().max().item()
+
+        # ── 3. push to wandb with the Trainer's global_step ────────────────
+        if logs:
+            wandb.log(logs, step=state.global_step)
 
 
 def main():
@@ -99,6 +134,8 @@ def main():
         dim=cfg.dim,
         n_heads=cfg.n_heads,
         n_layers=cfg.n_layers,
+        tie_word_embeddings=cfg.tie_word_embeddings,
+        load_stats=cfg.load_stats,
     )
 
     model = TokenFlowModel(model_config)
@@ -107,9 +144,9 @@ def main():
         output_dir=cfg.output_dir,
         overwrite_output_dir=True,
         do_train=True,
-        do_eval=False,
-        # eval_strategy="steps",
-        # eval_steps=cfg.eval_steps,
+        do_eval=True,
+        eval_strategy="steps",
+        eval_steps=cfg.eval_steps,
         bf16=True,
         learning_rate=cfg.learning_rate,
         adam_beta2=cfg.adam_beta2,
@@ -182,6 +219,8 @@ def main():
         logger.info(f"HuggingFace Training Arguments:\n{training_args}")
         logger.info(f"Total model parameters: {total_params}")
         logger.info(f"Non-embedding parameters: {nonembed_params}")
+        
+    stats_cb = StatsLoggingCallback(model)
 
     trainer = Trainer(
         model=model,
@@ -189,10 +228,12 @@ def main():
         train_dataset=train_data,
         eval_dataset=validation_data,
         data_collator=data_collator,
+        compute_metrics=None,
+        callbacks=[StatsLoggingCallback(model)],
     )
 
     if training_args.process_index == 0:
-        logger.info("The training begins.")
+        logger.info("Let the training begin.")
     
     trainer.train()
     trainer.save_model()

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
+from collections import OrderedDict
 import math
 import functools
 
@@ -21,7 +22,8 @@ from utils import (
     build_inference_block_mask,
     timestep_embedding,
     rectified_flow_interpolate,
-    build_inference_time
+    build_inference_time,
+    row_rms
 )
 
 
@@ -39,10 +41,11 @@ class TokenFlowConfig(PretrainedConfig):
         n_heads: int = 16,
         n_kv_heads: Optional[int] = None,
         n_layers: int = 12,
-        tied_embedding = True,
+        tie_word_embeddings = True,
         rope_scaling: int = 10000,
-        multiple_of: int = 256,
+        multiple_of: int = 64,
         norm_eps: float = 1e-6,
+        load_stats: bool = True,
         **kwargs,                      # catch any additional HF args
     ):
         super().__init__(**kwargs)
@@ -56,10 +59,11 @@ class TokenFlowConfig(PretrainedConfig):
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads or n_heads
         self.n_layers = n_layers
-        self.tied_embedding = tied_embedding
+        self.tie_word_embeddings = tie_word_embeddings
         self.rope_scaling = rope_scaling
         self.multiple_of = multiple_of
         self.norm_eps = norm_eps
+        self.load_stats = load_stats
 
 
 class RMSNorm(nn.Module):
@@ -181,7 +185,7 @@ class Attention(nn.Module):
         self.register_buffer("cache_k", torch.empty(0), persistent=False)
         self.register_buffer("cache_v", torch.empty(0), persistent=False)
 
-    def forward(self, x: Tensor, start_pos: int, freqs_cis):
+    def forward(self, x: Tensor, start_pos: int, freqs_cis, use_cache=False):
         """
         Args
         ----
@@ -202,7 +206,7 @@ class Attention(nn.Module):
 
         q, k = apply_rotary_emb(q, k, freqs_cis=freqs_cis)
 
-        if self.training:
+        if not use_cache:
             q = q.transpose(1, 2)                    # (B, H_q, L, D_h)
             k = k.transpose(1, 2)                    # (B, H_kv,L, D_h)
             v = v.transpose(1, 2)
@@ -295,57 +299,101 @@ class FeedForward(nn.Module):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
     
 
-class NormalizedEmbedding(nn.Embedding):
+class NormalizedEmbedding(nn.Module):
+    """Embedding layer whose vectors always have unit RMS.
+
+    * ``weight_param`` is the single learnable **nn.Parameter**.
+    * ``weight`` is a *property* that returns the RMS‑normalised tensor.
+    * ``state_dict`` is patched so the saved tensor is already normalised.
     """
-    nn.Embedding compatible layer whose output vectors are
-    l2-normalized on every forward pass.
-    """
+
     def __init__(self,
                  num_embeddings: int,
                  embedding_dim: int,
+                 *,
                  padding_idx: int | None = None,
                  scale_grad_by_freq: bool = False,
                  sparse: bool = False,
                  eps: float = 1e-12):
-        super().__init__(num_embeddings,
-                         embedding_dim,
-                         scale_grad_by_freq=scale_grad_by_freq,
-                         sparse=sparse,
-                         padding_idx=padding_idx)
-        self.eps = eps
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:          # type: ignore[override]
-        weight_norm = F.normalize(self.weight, p=2, dim=1, eps=self.eps)
-        return F.embedding(input,
-                           weight_norm,
-                           padding_idx=self.padding_idx,
-                           scale_grad_by_freq=self.scale_grad_by_freq,
-                           sparse=self.sparse)
-        
-
-class Scale(nn.Module):
-    """
-    Multiply the entire input tensor by a positive, learnable scalar.
-
-        y = exp(theta) · x
-    Args:
-    model_dim : int
-        Embedding/hidden dimension d.  Used only for a variance-preserving
-        initialization.
-    """
-    def __init__(self):
         super().__init__()
 
-        self.theta = nn.Parameter(torch.tensor(1.))
+        self.raw_weight = nn.Parameter(torch.empty(num_embeddings, embedding_dim))
+        self.register_parameter('weight_param', self.raw_weight)  # explicit alias
+
+        self.padding_idx = padding_idx
+        self.scale_grad_by_freq = scale_grad_by_freq
+        self.sparse = sparse
+        self.eps = eps
+
+        self.reset_parameters()
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
+    @property
+    def weight(self) -> torch.Tensor:  # noqa: D401
+        """RMS‑normalised tensor view."""
+        return self.raw_weight / row_rms(self.raw_weight, self.eps)
+
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
+    def forward(self, input: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+        return F.embedding(
+            input,
+            self.weight,                       # unit‑RMS
+            padding_idx=self.padding_idx,
+            scale_grad_by_freq=self.scale_grad_by_freq,
+            sparse=self.sparse,
+        )
+
+    # ------------------------------------------------------------------
+    # Check‑point hooks – save normalised weights
+    # ------------------------------------------------------------------
+    def state_dict(self, destination: OrderedDict[str, torch.Tensor] | None = None,
+                   prefix: str = '',
+                   keep_vars: bool = False) -> OrderedDict[str, torch.Tensor]:  # type: ignore[override]
+        sd = super().state_dict(destination, prefix, keep_vars=True)
+        key = prefix + 'raw_weight'
+        if key in sd:
+            w = self.weight  # detached normalised tensor
+            sd[key] = w if keep_vars else w.detach().clone()
+        return sd if keep_vars else OrderedDict((k, v.detach().clone()) for k, v in sd.items())
+
+    def _load_from_state_dict(self, state_dict: dict[str, torch.Tensor], prefix: str, *args, **kwargs):  # noqa: D401,E501
+        key = prefix + 'raw_weight'
+        if key in state_dict:
+            t = state_dict[key]
+            if abs((t.pow(2).mean(1).sqrt()).mean().item() - 1.0) < 1e-3:
+                state_dict[key] = t  # already normalised
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Init
+    # ------------------------------------------------------------------
+    def reset_parameters(self) -> None:  # noqa: D401
+        nn.init.normal_(self.raw_weight, mean=0.0, std=1.0 / math.sqrt(self.raw_weight.size(1)))
+        if self.padding_idx is not None:
+            with torch.no_grad():
+                self.raw_weight[self.padding_idx].fill_(0)
+
+
+class SharedNormalizedLinear(nn.Module):
+    def __init__(self, embed: NormalizedEmbedding, *, bias: bool = False):
+        super().__init__()
+        self.embed = embed
+        if bias:
+            self.bias = nn.Parameter(torch.zeros(embed.weight_param.size(0)))
+        else:
+            self.register_parameter('bias', None)
 
     @property
-    def scale(self) -> torch.Tensor:
-        """Return the positive scale (detached)."""
-        return torch.exp(self.theta.detach())
+    def weight(self):  # always RMS‑normalised
+        return self.embed.weight
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
-        return torch.exp(self.theta) * x
-
+    def forward(self, x):
+        return F.linear(x, self.weight, self.bias)
+    
 
 class TokenFlowBlock(nn.Module):
     def __init__(self, layer_id: int, config: TokenFlowConfig):
@@ -382,7 +430,7 @@ class TokenFlowBlock(nn.Module):
         self.ffn_norm = RMSNorm(config.dim, eps=config.norm_eps)
         self.modulation = Modulation(config.dim)
     
-    def forward(self, x, vec, start_pos, freqs_cis):
+    def forward(self, x, vec, start_pos, freqs_cis, use_cache=False):
         mod = self.modulation(vec)                        # (B, 2*M, dim)
 
         B, ctx, D = x.shape
@@ -395,7 +443,7 @@ class TokenFlowBlock(nn.Module):
         x_mod = (1 + mod_scale) * self.attention_norm(x_blk) + mod_shift
         x_mod_flat = x_mod.view(B, ctx, D)                  # (B, ctx, D)
 
-        h = x + self.attention(x_mod_flat, start_pos, freqs_cis)
+        h = x + self.attention(x_mod_flat, start_pos, freqs_cis, use_cache)
 
         # ---- feed‑forward with gating --------------------------------------
         ffn_out_blk = self.feed_forward(self.ffn_norm(h)).view(
@@ -431,6 +479,7 @@ class TokenFlowModel(PreTrainedModel):
         """
         super().__init__(config)
         self.config = config
+        self.load_stats = config.load_stats
         self.n_layers = config.n_layers
         self.n_heads = config.n_heads
         self.blk_num = config.blk_num
@@ -438,18 +487,28 @@ class TokenFlowModel(PreTrainedModel):
         self.max_batch = config.max_batch
         self.dim = config.dim
         self.time_dim = config.time_dim
+        self.tied_word_embeddings = config.tie_word_embeddings
 
-        self.token_embed = NormalizedEmbedding(config.vocab_size, config.dim, config.pad_token_id)
+        self.token_embed = NormalizedEmbedding(config.vocab_size, config.dim)
         self.beta_dist = torch.distributions.Beta(torch.tensor(2.0), torch.tensor(5.0))
         self.time_embed = MLPEmbedder(in_dim=self.time_dim, dim=config.dim)
-        self.scale = Scale()
 
         self.layers = torch.nn.ModuleList()
         for layer_id in range(config.n_layers):
             self.layers.append(TokenFlowBlock(layer_id, config))
 
-        self.final_layer_norm = RMSNorm(config.dim, eps=config.norm_eps)
-        self.output_proj = nn.Linear(config.dim, config.vocab_size, bias=False)
+        if config.tie_word_embeddings:
+            self.final_layer_norm = nn.LayerNorm(
+                config.dim,
+                eps=config.norm_eps,
+                elementwise_affine=True          # keep it learnable
+            )
+            self.output_proj = SharedNormalizedLinear(self.token_embed, bias=False)
+            # self._tied_weights_keys = [r"^token_embed\.weight$", r"^output_proj\.weight$"]
+            self._tied_weights_keys = [r"^token_embed\.weight_param$", r"^output_proj\.embed\.weight_param$"]
+        else:
+            self.final_layer_norm = RMSNorm(config.dim, eps=config.norm_eps)
+            self.output_proj = nn.Linear(config.dim, config.vocab_size, bias=False)
 
         freqs_cis = precompute_freqs_cis(
             self.dim//self.n_heads, self.blk_num*self.blk_size, config.rope_scaling)
@@ -472,26 +531,36 @@ class TokenFlowModel(PreTrainedModel):
         return self.beta_dist.sample(shape).to(device)
     
         
-    def _compute_singular_logits(self, xt: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    def _compute_singular_logits(self, xt: torch.Tensor, t: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
         """
         xt:     (B, seq_len=M*N, d)
         t_full: (B, seq_len)           -- per-position time
         returns flow_logits of shape (B, seq_len, V)
         """
         E = self.token_embed.weight
-        V, d = E.shape
+        vocab_size, dim = E.shape
 
         xt_norm2 = xt.pow(2).sum(dim=-1, keepdim=True) # (B, seq_len, 1)
+        e_norm2 = E.pow(2).sum(dim=-1).unsqueeze(0).unsqueeze(0)
 
         cross = xt @ E.t() # (B, seq_len, V)
-        D = xt_norm2 - 2 * t * cross + (t**2)  # (B, seq_len, V)
-        denom = 2 * (1 - t).pow(2) # (B, seq_len, 1)
+        D = xt_norm2 - 2 * t * cross + (t**2) * e_norm2  # (B, seq_len, V)
+        denom = 2 * (1 - t).pow(2) + eps ** 2 # (B, seq_len, 1)
         D_scaled = -D / denom # (B, seq_len, V)
 
         logZ = torch.logsumexp(D_scaled, dim=-1, keepdim=True) # (B, seq_len, 1)
 
         return D_scaled - logZ
-        
+    
+    
+    def _tied_weights_keys(self):
+        """
+        Return a list whose elements are *sets* of parameter names that
+        share the very same storage.  The saver compares its findings
+        against this list and raises if they diverge.
+        """
+        return [{"token_embed.weight", "output_proj.weight"}]
+    
 
     def forward(
         self, 
@@ -514,7 +583,7 @@ class TokenFlowModel(PreTrainedModel):
         if labels is not None:
             return self.training_forward(input_ids, labels)
 
-        return self.inference_forward(input_ids, start_pos, time, **kwargs)
+        return self.inference_forward(input_ids, start_pos, time)
         
 
     def training_forward(self, input_ids: torch.Tensor, labels: torch.Tensor):
@@ -534,18 +603,18 @@ class TokenFlowModel(PreTrainedModel):
         freqs_cis = self._rope_cache(input_ids.device).repeat(2, 1)
         
         x1 = self.token_embed(input_ids)
-        x0 = torch.randn_like(x1) / math.sqrt(self.dim)
+        x0 = torch.randn_like(x1)
         t_sample = self._sample_time((batch_size, self.blk_num), input_ids.device)
         t_all = torch.cat([torch.ones_like(t_sample), t_sample], dim=1)
         t_full = t_sample.repeat_interleave(self.blk_size, dim=1).unsqueeze(-1)
         
-        x_all = rectified_flow_interpolate(x0, x1, t_full)
+        x_all = rectified_flow_interpolate(x0, x1, t_full) # [x1, xt]
         t_vec = self.time_embed(timestep_embedding(t_all, self.time_dim))
-        xt = x_all[:, -self.blk_num * self.blk_size:]
-        h = self.scale(x_all)
+        xt = x_all[:, -self.blk_num * self.blk_size:] # (batch_size, 2 * blk_num * blk_size, dim)
+        h = x_all
 
         for layer in self.layers:
-            h = layer(h, t_vec, start_pos, freqs_cis)
+            h = layer(h, t_vec, start_pos, freqs_cis, use_cache=False)
 
         batch_size_, seqlen_ = labels.shape
         assert batch_size_ == batch_size and seqlen_ == seq_len, f"Labels must match the shape of input {input_ids.shape}. Got {labels.shape}."
@@ -556,6 +625,26 @@ class TokenFlowModel(PreTrainedModel):
         
         singular_logits = self._compute_singular_logits(xt, t_full)
         logits = model_logits + singular_logits
+        
+        if self.load_stats:           
+            with torch.no_grad():
+                K = 10
+                mdl_flat = model_logits.detach().abs().view(-1, model_logits.size(-1))
+                sng_flat = singular_logits.detach().abs().view(-1, singular_logits.size(-1))
+                all_flat = logits.detach().abs().view(-1, singular_logits.size(-1))
+
+                mdl_topk_mean = mdl_flat.topk(K, dim=-1).values.mean().item()
+                sng_topk_mean = sng_flat.topk(K, dim=-1).values.mean().item()
+                all_topk_mean = all_flat.topk(K, dim=-1).values.mean().item()
+
+                self._logits_stats = {
+                    "logits/model_top10_mean":     mdl_topk_mean,
+                    "logits/model_max":           mdl_flat.max().item(),
+                    "logits/singular_top10_mean":  sng_topk_mean,
+                    "logits/singular_max":        sng_flat.max().item(),
+                    "logits/all_top10_mean":  all_topk_mean,
+                    "logits/all_max":        all_flat.max().item(),
+                }
         
         loss = F.cross_entropy(
             logits.view(-1, logits.size(-1)), 
@@ -593,10 +682,10 @@ class TokenFlowModel(PreTrainedModel):
         t_full = torch.full((batch_size, self.blk_size), time, device=x_all.device).unsqueeze(-1)
 
         xt = x_all[:, -self.blk_size:]
-        h = self.scale(x_all)
+        h = x_all
 
         for layer in self.layers:
-            h = layer(h, t_vec, start_pos, freqs_cis)
+            h = layer(h, t_vec, start_pos, freqs_cis, use_cache=True)
         
         h = h[:, -self.blk_size:]
         h = self.final_layer_norm(h)
@@ -640,7 +729,7 @@ class TokenFlowModel(PreTrainedModel):
 
         prev_pos = 0
         for cur_pos in range(0, total_len, self.blk_size):
-            x_all = torch.randn(batch_size, self.blk_size, self.dim, device=device) / math.sqrt(self.dim)
+            x_all = torch.randn(batch_size, self.blk_size, self.dim, device=device)
             if cur_pos - prev_pos > 0:
                 x1 = self.token_embed(tokens[:, prev_pos:cur_pos])
                 x_all = torch.cat([x1, x_all], dim=1)
