@@ -29,6 +29,8 @@ from model import TokenFlowConfig
 # -----------------------------------------------------------------------------
 from model import TokenFlowModel  # noqa: E402
 
+# python3 examine.py --ckpt_dir 
+
 
 def parse_args():
     """CLI helper."""

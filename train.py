@@ -31,28 +31,57 @@ class StatsLoggingCallback(TrainerCallback):
     """
     def __init__(self, model):
         self.model = model            # keep a handle to the live model
+        self._grad_params = {}
+        for name, param in model.named_parameters():
+            if (
+                ("token_embed.weight" in name)                  # main embedding
+                or "norm" in name.lower()                       # ln / rmsnorm
+            ):
+                self._grad_params[name] = param
 
-    # ----------------------------------------------
+        self._grad_stats = None
+
+    def on_train_batch_end(self, args, state, control, **kwargs):
+        """
+        At this point gradients are populated (still *before* optimizer.step).
+        We gather stats only on the micro-batch that actually triggers the
+        optimizer update (i.e. the last one in the gradient-accum cycle).
+        """
+        if (state.step + 1) % args.gradient_accumulation_steps != 0:
+            return  # not the last micro-batch → skip
+
+        stats = {}
+        for name, param in self._grad_params.items():
+            if param.grad is None:
+                continue                             # param frozen or unused
+            g = param.grad.detach()
+            stats[f"grads/{name}_rms"] = g.pow(2).mean().sqrt().item()
+            stats[f"grads/{name}_max"] = g.abs().max().item()
+
+        self._grad_stats = stats   # stash until on_step_end
+
     def on_step_end(self, args, state, control, **kwargs):
-        # respect logging cadence and log only on the main process
+        # respect the Trainer’s should_log and only on rank 0
         if not control.should_log or args.process_index != 0:
             return
 
         logs = {}
 
-        # ── 1. logits stats saved by TokenFlowModel.training_forward ────────
         extra = getattr(self.model, "_logits_stats", None)
         if extra is not None:
             logs.update(extra)
 
-        # ── 2. layer‑norm weight stats ─────────────────────────────────────
+        # 2) layernorm weight stats
         for name, module in self.model.named_modules():
             if isinstance(module, (nn.LayerNorm, RMSNorm)):
                 w = module.weight.data
                 logs[f"layernorms/{name}_rms"] = w.pow(2).mean().sqrt().item()
                 logs[f"layernorms/{name}_max"] = w.abs().max().item()
 
-        # ── 3. push to wandb with the Trainer's global_step ────────────────
+        if self._grad_stats:
+            logs.update(self._grad_stats)
+            self._grad_stats = None
+
         if logs:
             wandb.log(logs, step=state.global_step)
 
@@ -217,8 +246,6 @@ def main():
         logger.info(f"HuggingFace Training Arguments:\n{training_args}")
         logger.info(f"Total model parameters: {total_params}")
         logger.info(f"Non-embedding parameters: {nonembed_params}")
-        
-    stats_cb = StatsLoggingCallback(model)
 
     trainer = Trainer(
         model=model,

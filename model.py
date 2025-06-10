@@ -66,6 +66,22 @@ class TokenFlowConfig(PretrainedConfig):
         self.load_stats = load_stats
 
 
+torch._inductor.config.max_autotune = True        # global switch
+
+@torch.compile(fullgraph=True, mode="max-autotune-no-cudagraphs")
+def _flex32(q, k, v, blk_mask, scale, gqa):
+    """
+    Wrap flex_attention so the Triton kernel is regenerated with
+    BLOCK_M = BLOCK_N = 32 instead of the stock 128.
+    """
+    return flex_attention(
+        q, k, v,
+        block_mask=blk_mask,
+        scale=scale,
+        enable_gqa=gqa           # bool
+    )
+
+
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         """
@@ -180,6 +196,31 @@ class Attention(nn.Module):
         self.wv = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(config.n_heads * self.head_dim, config.dim, bias=False)
 
+        if config.blk_size >= 128:
+            self._flex_attn = lambda q, k, v, block_mask, scale, enable_gqa: flex_attention(
+                q, k, v, block_mask=block_mask, scale=scale, enable_gqa=enable_gqa
+            )
+        else:
+            _tile_sz = config.blk_size
+            def _flex_small(q, k, v, block_mask, scale, enable_gqa, _ts=_tile_sz):
+                opts = {
+                    "BLOCK_M":  _ts, "BLOCK_N":  _ts,
+                    "BLOCK_M1": _ts, "BLOCK_N1": _ts,
+                    "BLOCK_M2": _ts, "BLOCK_N2": _ts,
+                }
+                return flex_attention(
+                    q, k, v,
+                    block_mask=block_mask,
+                    scale=scale,
+                    enable_gqa=enable_gqa,
+                    kernel_options=opts,
+                )
+            self._flex_attn = torch.compile(
+                _flex_small,
+                fullgraph=True,
+                mode="max-autotune-no-cudagraphs"
+            )
+
         self._block_mask_cache: dict[torch.device, "BlockMask"] = {}
         
         self.register_buffer("cache_k", torch.empty(0), persistent=False)
@@ -218,7 +259,7 @@ class Attention(nn.Module):
                 )
             block_mask = self._block_mask_cache[dev] 
 
-            out = flex_attention(
+            out = self._flex_attn(
                 q, k, v,
                 block_mask=block_mask,    # block‑sparse causal mask
                 scale=1.0 / math.sqrt(self.head_dim),
@@ -250,7 +291,7 @@ class Attention(nn.Module):
                 )
             block_mask = self._block_mask_cache[dev] 
 
-            out = flex_attention(
+            out = self._flex_attn(
                 q, k, v,
                 block_mask=block_mask._adjust(q.shape[-2], k.shape[-2]),                     # causal via cache
                 scale=1.0 / math.sqrt(self.head_dim),
@@ -490,7 +531,7 @@ class TokenFlowModel(PreTrainedModel):
         self.tied_word_embeddings = config.tie_word_embeddings
 
         self.token_embed = NormalizedEmbedding(config.vocab_size, config.dim)
-        self.beta_dist = torch.distributions.Beta(torch.tensor(2.0), torch.tensor(5.0))
+        # self.beta_dist = torch.distributions.Beta(torch.tensor(2.0), torch.tensor(5.0))
         self.time_embed = MLPEmbedder(in_dim=self.time_dim, dim=config.dim)
 
         self.layers = torch.nn.ModuleList()
@@ -504,7 +545,6 @@ class TokenFlowModel(PreTrainedModel):
                 elementwise_affine=True          # keep it learnable
             )
             self.output_proj = SharedNormalizedLinear(self.token_embed, bias=False)
-            # self._tied_weights_keys = [r"^token_embed\.weight$", r"^output_proj\.weight$"]
             self._tied_weights_keys = [r"^token_embed\.weight_param$", r"^output_proj\.embed\.weight_param$"]
         else:
             self.final_layer_norm = RMSNorm(config.dim, eps=config.norm_eps)
@@ -526,9 +566,9 @@ class TokenFlowModel(PreTrainedModel):
         return self._freqs_cis
     
     
-    @torch._dynamo.disable
-    def _sample_time(self, shape, device):
-        return self.beta_dist.sample(shape).to(device)
+    # @torch._dynamo.disable
+    # def _sample_time(self, shape, device):
+    #     return self.beta_dist.sample(shape).to(device)
     
         
     def _compute_singular_logits(self, xt: torch.Tensor, t: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -553,13 +593,13 @@ class TokenFlowModel(PreTrainedModel):
         return D_scaled - logZ
     
     
-    def _tied_weights_keys(self):
-        """
-        Return a list whose elements are *sets* of parameter names that
-        share the very same storage.  The saver compares its findings
-        against this list and raises if they diverge.
-        """
-        return [{"token_embed.weight", "output_proj.weight"}]
+    # def _tied_weights_keys(self):
+    #     """
+    #     Return a list whose elements are *sets* of parameter names that
+    #     share the very same storage.  The saver compares its findings
+    #     against this list and raises if they diverge.
+    #     """
+    #     return [{"token_embed.weight", "output_proj.weight"}]
     
 
     def forward(
@@ -604,7 +644,8 @@ class TokenFlowModel(PreTrainedModel):
         
         x1 = self.token_embed(input_ids)
         x0 = torch.randn_like(x1)
-        t_sample = self._sample_time((batch_size, self.blk_num), input_ids.device)
+        # t_sample = self._sample_time((batch_size, self.blk_num), input_ids.device)
+        t_sample = torch.rand((batch_size, self.blk_num), device=input_ids.device)
         t_all = torch.cat([torch.ones_like(t_sample), t_sample], dim=1)
         t_full = t_sample.repeat_interleave(self.blk_size, dim=1).unsqueeze(-1)
         
@@ -626,25 +667,25 @@ class TokenFlowModel(PreTrainedModel):
         singular_logits = self._compute_singular_logits(xt, t_full)
         logits = model_logits + singular_logits
         
-        if self.load_stats:           
-            with torch.no_grad():
-                K = 10
-                mdl_flat = model_logits.detach().abs().view(-1, model_logits.size(-1))
-                sng_flat = singular_logits.detach().abs().view(-1, singular_logits.size(-1))
-                all_flat = logits.detach().abs().view(-1, singular_logits.size(-1))
+        # if self.load_stats:           
+        #     with torch.no_grad():
+        #         K = 10
+        #         mdl_flat = model_logits.detach().abs().view(-1, model_logits.size(-1))
+        #         sng_flat = singular_logits.detach().abs().view(-1, singular_logits.size(-1))
+        #         all_flat = logits.detach().abs().view(-1, singular_logits.size(-1))
 
-                mdl_topk_mean = mdl_flat.topk(K, dim=-1).values.mean().item()
-                sng_topk_mean = sng_flat.topk(K, dim=-1).values.mean().item()
-                all_topk_mean = all_flat.topk(K, dim=-1).values.mean().item()
+        #         mdl_topk_mean = mdl_flat.topk(K, dim=-1).values.mean().item()
+        #         sng_topk_mean = sng_flat.topk(K, dim=-1).values.mean().item()
+        #         all_topk_mean = all_flat.topk(K, dim=-1).values.mean().item()
 
-                self._logits_stats = {
-                    "logits/model_top10_mean":     mdl_topk_mean,
-                    "logits/model_max":           mdl_flat.max().item(),
-                    "logits/singular_top10_mean":  sng_topk_mean,
-                    "logits/singular_max":        sng_flat.max().item(),
-                    "logits/all_top10_mean":  all_topk_mean,
-                    "logits/all_max":        all_flat.max().item(),
-                }
+        #         self._logits_stats = {
+        #             "logits/model_top10_mean":     mdl_topk_mean,
+        #             "logits/model_max":           mdl_flat.max().item(),
+        #             "logits/singular_top10_mean":  sng_topk_mean,
+        #             "logits/singular_max":        sng_flat.max().item(),
+        #             "logits/all_top10_mean":  all_topk_mean,
+        #             "logits/all_max":        all_flat.max().item(),
+        #         }
         
         loss = F.cross_entropy(
             logits.view(-1, logits.size(-1)), 
