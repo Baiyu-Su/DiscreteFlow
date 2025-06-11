@@ -29,7 +29,7 @@ from model import TokenFlowConfig
 # -----------------------------------------------------------------------------
 from model import TokenFlowModel  # noqa: E402
 
-# python3 examine.py --ckpt_dir 
+# python3 examine.py --ckpt_dir ./out_small --tokenizer_dir ./.hf_llama --batch_size 8
 
 
 def parse_args():
@@ -93,7 +93,7 @@ def main() -> None:
     model.to("cuda")
     model.eval()
     
-    time_schedule = np.linspace(0, 1., 1024)
+    time_schedule = np.linspace(0, 1., 128)
 
     # ------------------------------------------------------------------
     # Perform unconditional generation.

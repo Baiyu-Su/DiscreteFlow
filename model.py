@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from typing import List, Tuple, Optional
 from collections import OrderedDict
 import math
-import functools
 
 import torch
 import torch.nn as nn
@@ -35,7 +34,7 @@ class TokenFlowConfig(PretrainedConfig):
         blk_num: int = 128,
         blk_size: int = 8,
         max_batch: int = 64,
-        vocab_size: int = 32001,
+        vocab_size: int = 32000,
         dim: int = 1024,
         time_dim: int = 256,
         n_heads: int = 16,
@@ -64,22 +63,6 @@ class TokenFlowConfig(PretrainedConfig):
         self.multiple_of = multiple_of
         self.norm_eps = norm_eps
         self.load_stats = load_stats
-
-
-torch._inductor.config.max_autotune = True        # global switch
-
-@torch.compile(fullgraph=True, mode="max-autotune-no-cudagraphs")
-def _flex32(q, k, v, blk_mask, scale, gqa):
-    """
-    Wrap flex_attention so the Triton kernel is regenerated with
-    BLOCK_M = BLOCK_N = 32 instead of the stock 128.
-    """
-    return flex_attention(
-        q, k, v,
-        block_mask=blk_mask,
-        scale=scale,
-        enable_gqa=gqa           # bool
-    )
 
 
 class RMSNorm(nn.Module):
@@ -368,17 +351,11 @@ class NormalizedEmbedding(nn.Module):
 
         self.reset_parameters()
 
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
     @property
     def weight(self) -> torch.Tensor:  # noqa: D401
-        """RMS‑normalised tensor view."""
+        """RMS-normalised tensor view."""
         return self.raw_weight / row_rms(self.raw_weight, self.eps)
 
-    # ------------------------------------------------------------------
-    # Forward
-    # ------------------------------------------------------------------
     def forward(self, input: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
         return F.embedding(
             input,
@@ -388,9 +365,6 @@ class NormalizedEmbedding(nn.Module):
             sparse=self.sparse,
         )
 
-    # ------------------------------------------------------------------
-    # Check‑point hooks – save normalised weights
-    # ------------------------------------------------------------------
     def state_dict(self, destination: OrderedDict[str, torch.Tensor] | None = None,
                    prefix: str = '',
                    keep_vars: bool = False) -> OrderedDict[str, torch.Tensor]:  # type: ignore[override]
@@ -544,12 +518,14 @@ class TokenFlowModel(PreTrainedModel):
                 eps=config.norm_eps,
                 elementwise_affine=True          # keep it learnable
             )
+            # with torch.no_grad():
+            #     self.final_layer_norm.weight.fill_(0.5)
             self.output_proj = SharedNormalizedLinear(self.token_embed, bias=False)
             self._tied_weights_keys = [r"^token_embed\.weight_param$", r"^output_proj\.embed\.weight_param$"]
         else:
             self.final_layer_norm = RMSNorm(config.dim, eps=config.norm_eps)
             self.output_proj = nn.Linear(config.dim, config.vocab_size, bias=False)
-
+            
         freqs_cis = precompute_freqs_cis(
             self.dim//self.n_heads, self.blk_num*self.blk_size, config.rope_scaling)
         self.register_buffer("freqs_cis", freqs_cis, persistent=False)

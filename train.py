@@ -19,7 +19,7 @@ from datasets import load_dataset
 from loguru import logger
 from pprint import pformat
 
-from model import TokenFlowModel, TokenFlowConfig, RMSNorm   
+from model import TokenFlowModel, TokenFlowConfig, RMSNorm, NormalizedEmbedding
 from dataloader import DataCollatorPretrainFlow
 
 
@@ -30,57 +30,59 @@ class StatsLoggingCallback(TrainerCallback):
       • RMS & max‑abs of model_logits & singular_logits (logits/…)
     """
     def __init__(self, model):
-        self.model = model            # keep a handle to the live model
-        self._grad_params = {}
-        for name, param in model.named_parameters():
-            if (
-                ("token_embed.weight" in name)                  # main embedding
-                or "norm" in name.lower()                       # ln / rmsnorm
-            ):
-                self._grad_params[name] = param
+        super().__init__()
+        self.model = model
+        self._grad_stats = {}
 
-        self._grad_stats = None
+        # A closure that captures the parameter name and stores its grad stats
+        def make_hook(name):
+            def hook(grad):
+                if grad is not None:
+                    # This hook is called during the backward pass
+                    detached_grad = grad.detach()
+                    self._grad_stats[f"grads/{name}_rms"] = detached_grad.pow(2).mean().sqrt().item()
+                    self._grad_stats[f"grads/{name}_max"] = detached_grad.abs().max().item()
+            return hook
 
-    def on_train_batch_end(self, args, state, control, **kwargs):
-        """
-        At this point gradients are populated (still *before* optimizer.step).
-        We gather stats only on the micro-batch that actually triggers the
-        optimizer update (i.e. the last one in the gradient-accum cycle).
-        """
-        if (state.step + 1) % args.gradient_accumulation_steps != 0:
-            return  # not the last micro-batch → skip
+        # Register the hook for each relevant parameter
+        for name, module in self.model.named_modules():
+            if isinstance(module, (nn.LayerNorm, RMSNorm, NormalizedEmbedding)):
+                if hasattr(module, 'weight') and module.weight is not None:
+                    # The hook will be named after the module's weight parameter
+                    param_name = f"{name}.weight"
+                    module.weight.register_hook(make_hook(param_name))
+                elif hasattr(module, 'raw_weight') and module.raw_weight is not None:
+                    # The hook will be named after the module's weight parameter
+                    param_name = f"{name}.raw_weight"
+                    module.weight.register_hook(make_hook(param_name))
 
-        stats = {}
-        for name, param in self._grad_params.items():
-            if param.grad is None:
-                continue                             # param frozen or unused
-            g = param.grad.detach()
-            stats[f"grads/{name}_rms"] = g.pow(2).mean().sqrt().item()
-            stats[f"grads/{name}_max"] = g.abs().max().item()
-
-        self._grad_stats = stats   # stash until on_step_end
+    # on_train_batch_end is no longer needed for gradients
+    # def on_train_batch_end(...):
 
     def on_step_end(self, args, state, control, **kwargs):
-        # respect the Trainer’s should_log and only on rank 0
+        # Respect the Trainer’s should_log and only on rank 0
         if not control.should_log or args.process_index != 0:
             return
 
         logs = {}
 
-        extra = getattr(self.model, "_logits_stats", None)
-        if extra is not None:
-            logs.update(extra)
+        # Log logits stats if they exist
+        logits_stats = getattr(self.model, "_logits_stats", None)
+        if logits_stats is not None:
+            logs.update(logits_stats)
 
-        # 2) layernorm weight stats
+        # Log layernorm weight stats
         for name, module in self.model.named_modules():
             if isinstance(module, (nn.LayerNorm, RMSNorm)):
-                w = module.weight.data
-                logs[f"layernorms/{name}_rms"] = w.pow(2).mean().sqrt().item()
-                logs[f"layernorms/{name}_max"] = w.abs().max().item()
+                if hasattr(module, 'weight') and module.weight is not None:
+                    w = module.weight.data
+                    logs[f"layernorms/{name}_rms"] = w.pow(2).mean().sqrt().item()
+                    logs[f"layernorms/{name}_max"] = w.abs().max().item()
 
+        # Log the gradient stats collected by the hooks and then clear them
         if self._grad_stats:
             logs.update(self._grad_stats)
-            self._grad_stats = None
+            self._grad_stats = {}
 
         if logs:
             wandb.log(logs, step=state.global_step)

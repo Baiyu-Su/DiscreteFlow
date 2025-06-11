@@ -1,9 +1,9 @@
 class MyConfig:
-    blk_num = 16
-    blk_size = 64
+    blk_num = 32
+    blk_size = 32
 
-    output_dir = "./out_small_32*32"
-    run_name = "small_run"
+    output_dir = "./out_small_32"
+    run_name = "small_run_32"
     load_stats = True
 
     # Model config
