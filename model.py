@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
-from collections import OrderedDict
 import math
 import functools
 
@@ -24,7 +23,6 @@ from model_utils import (
     timestep_embedding,
     rectified_flow_interpolate,
     build_inference_time,
-    row_rms
 )
 
 
@@ -38,17 +36,19 @@ class TokenFlowConfig(PretrainedConfig):
         max_batch: int = 64,
         vocab_size: int = 32000,
         dim: int = 1024,
+        hidden_dim: int | None = None,
         time_dim: int = 256,
         n_heads: int = 16,
         n_kv_heads: Optional[int] = None,
         n_layers: int = 12,
         init_cutoff_factor: float = 3.0,
+        embed_scale: float | None = None,
         tie_word_embeddings = True,
         rope_scaling: int = 10000,
         multiple_of: int = 64,
         norm_eps: float = 1e-6,
         load_stats: bool = True,
-        **kwargs,                      # catch any additional HF args
+        **kwargs,
     ):
         super().__init__(**kwargs)
 
@@ -57,11 +57,13 @@ class TokenFlowConfig(PretrainedConfig):
         self.max_batch = max_batch
         self.vocab_size = vocab_size
         self.dim = dim
+        self.hidden_dim = hidden_dim or 4 * dim
         self.time_dim = time_dim
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads or n_heads
         self.n_layers = n_layers
         self.init_cutoff_factor = init_cutoff_factor
+        self.embed_scale = embed_scale
         self.tie_word_embeddings = tie_word_embeddings
         self.rope_scaling = rope_scaling
         self.multiple_of = multiple_of
@@ -93,6 +95,9 @@ class RMSNorm(nn.Module):
             torch.Tensor: The normalized tensor.
         """
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def reset_parameters(self):
+        nn.init.ones_(self.weight)
 
     def forward(self, x):
         """
@@ -132,6 +137,10 @@ class Modulation(nn.Module):
         super().__init__()
         self.w = nn.Linear(dim, 3 * dim)
 
+    def reset_parameters(self):
+        std = 1 / math.sqrt(self.dim)
+        init_normal(self.w, std, self.init_cutoff_factor)
+
     def forward(self, vec: torch.Tensor) -> ModulationOut:
         """
         Apply modulation to the input tensor.
@@ -161,6 +170,11 @@ class MLPEmbedder(nn.Module):
         self.wi = nn.Linear(in_dim, dim, bias=True)
         self.silu = nn.SiLU()
         self.wo = nn.Linear(dim, dim, bias=True)
+
+    def reset_parameters(self):
+        std = 1 / math.sqrt(self.in_dim)
+        init_normal(self.wi, std, self.init_cutoff_factor)
+        init_normal(self.wo, std, self.init_cutoff_factor)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -202,7 +216,6 @@ class Attention(nn.Module):
         self.blk_num = config.blk_num
         self.init_cutoff_factor = config.init_cutoff_factor
 
-        # Projections ---------------------------------------------------------
         self.wq = nn.Linear(config.dim, self.n_heads * self.head_dim, bias=False)
         self.wk = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wv = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False)
@@ -329,11 +342,7 @@ class Attention(nn.Module):
 
 
 class FeedForward(nn.Module):
-    def __init__(
-        self,
-        layer_id: int,
-        config: TokenFlowConfig,
-    ):
+    def __init__(self, layer_id: int, config: TokenFlowConfig):
         """
         Initialize the FeedForward module.
         Args:
@@ -375,87 +384,70 @@ class FeedForward(nn.Module):
     
 
 class NormalizedEmbedding(nn.Module):
-    """Embedding layer whose vectors always have unit RMS.
+    """Embedding layer whose vectors are normalized to a target RMS value.
 
-    * ``weight_param`` is the single learnable **nn.Parameter**.
-    * ``weight`` is a *property* that returns the RMS‑normalised tensor.
-    * ``state_dict`` is patched so the saved tensor is already normalised.
+    The normalization is performed in-place within the forward pass, ensuring
+    that the stored weights are always normalized. This operation is done
+    without tracking gradients.
+
+    Attributes:
+        raw_weight (nn.Parameter): The learnable parameter tensor.
+        scale (float): The target RMS value for the embedding vectors.
     """
 
-    def __init__(self,
-                 num_embeddings: int,
-                 embedding_dim: int,
-                 *,
-                 padding_idx: int | None = None,
-                 scale_grad_by_freq: bool = False,
-                 sparse: bool = False,
-                 eps: float = 1e-12):
+    def __init__(self, config: TokenFlowConfig):
         super().__init__()
+        
+        if not isinstance(config.embed_scale, float) or config.embed_scale <= 0.0:
+            raise ValueError("The `embed_scale` must be a positive float.")
+            
+        self.vocab_size = config.vocab_size
+        self.dim = config.dim
+        self.embed_scale = config.embed_scale if config.embed_scale is not None else 1.0 / math.sqrt(self.dim)
+        self.padding_idx = None
+        self.scale_grad_by_freq = False
+        self.sparse = False
+        self.eps = config.norm_eps
 
-        self.raw_weight = nn.Parameter(torch.empty(num_embeddings, embedding_dim))
-        self.register_parameter('weight_param', self.raw_weight)  # explicit alias
-
-        self.padding_idx = padding_idx
-        self.scale_grad_by_freq = scale_grad_by_freq
-        self.sparse = sparse
-        self.eps = eps
-
+        self.weight = nn.Parameter(torch.empty(self.vocab_size, self.dim))
         self.reset_parameters()
 
-    @property
-    def weight(self) -> torch.Tensor:  # noqa: D401
-        """RMS-normalised tensor view."""
-        return self.raw_weight / row_rms(self.raw_weight, self.eps)
+    def reset_parameters(self) -> None:
+        """Initializes and normalizes the embedding weights."""
+        nn.init.normal_(self.weight, mean=0.0, std=1.0)
+        with torch.no_grad():
+            self._normalize_weights()
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+    def _normalize_weights(self) -> None:
+        """
+        Performs in-place RMS normalization of the weight tensor.
+        This method is designed to be called within a `torch.no_grad()` context.
+        """
+        self.weight.data = F.normalize(self.weight.data, p=2, dim=1) * self.embed_scale * math.sqrt(self.dim)
+        if self.padding_idx is not None:
+            self.weight.data[self.padding_idx].fill_(0)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        """
+        Performs a forward pass with in-place weight normalization.
+        """
+        with torch.no_grad():
+            self._normalize_weights()
+            
         return F.embedding(
             input,
-            self.weight,                       # unit‑RMS
+            self.weight,
             padding_idx=self.padding_idx,
             scale_grad_by_freq=self.scale_grad_by_freq,
             sparse=self.sparse,
         )
-
-    def state_dict(self, destination: OrderedDict[str, torch.Tensor] | None = None,
-                   prefix: str = '',
-                   keep_vars: bool = False) -> OrderedDict[str, torch.Tensor]:  # type: ignore[override]
-        sd = super().state_dict(destination, prefix, keep_vars=True)
-        key = prefix + 'raw_weight'
-        if key in sd:
-            w = self.weight  # detached normalised tensor
-            sd[key] = w if keep_vars else w.detach().clone()
-        return sd if keep_vars else OrderedDict((k, v.detach().clone()) for k, v in sd.items())
-
-    def _load_from_state_dict(self, state_dict: dict[str, torch.Tensor], prefix: str, *args, **kwargs):  # noqa: D401,E501
-        key = prefix + 'raw_weight'
-        if key in state_dict:
-            t = state_dict[key]
-            if abs((t.pow(2).mean(1).sqrt()).mean().item() - 1.0) < 1e-3:
-                state_dict[key] = t  # already normalised
-        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
-
-    def reset_parameters(self) -> None:  # noqa: D401
-        nn.init.normal_(self.raw_weight, mean=0.0, std=1.0 / math.sqrt(self.raw_weight.size(1)))
-        if self.padding_idx is not None:
-            with torch.no_grad():
-                self.raw_weight[self.padding_idx].fill_(0)
-
-
-class SharedNormalizedLinear(nn.Module):
-    def __init__(self, embed: NormalizedEmbedding, *, bias: bool = False):
-        super().__init__()
-        self.embed = embed
-        if bias:
-            self.bias = nn.Parameter(torch.zeros(embed.weight_param.size(0)))
-        else:
-            self.register_parameter('bias', None)
-
-    @property
-    def weight(self):  # always RMS‑normalised
-        return self.embed.weight
-
-    def forward(self, x):
-        return F.linear(x, self.weight, self.bias)
+        
+    def extra_repr(self) -> str:
+        """Adds extra information to the module representation."""
+        s = f'{self.vocab_size}, {self.dim}'
+        if self.embed_scale != 1.0:
+            s += f', scale={self.embed_scale}'
+        return s
     
 
 class TokenFlowBlock(nn.Module):
@@ -466,32 +458,27 @@ class TokenFlowBlock(nn.Module):
             layer_id (int): Identifier for the layer.
             config (TokenFlowConfig): Model configuration parameters.
         Attributes:
-            n_heads (int): Number of attention heads.
-            dim (int): Dimension size of the model.
-            head_dim (int): Dimension size of each attention head.
-            N (int): Block size.
+            blk_size (int): Block size.
             attention (Attention): Attention module.
             feed_forward (FeedForward): FeedForward module.
-            layer_id (int): Identifier for the layer.
             attention_norm (RMSNorm): Layer normalization for attention output.
             ffn_norm (RMSNorm): Layer normalization for feedforward output.
             modulation (Modulation): adaLN modulation module.
         """
         super().__init__()
-        self.n_heads = config.n_heads
-        self.dim = config.dim
-        self.head_dim = config.dim // config.n_heads
         self.blk_size = config.blk_size
-        self.attention = Attention(config)
-        self.feed_forward = FeedForward(
-            dim=config.dim,
-            hidden_dim=4*config.dim,
-            multiple_of=config.multiple_of,
-        )
-        self.layer_id = layer_id
+        self.attention = Attention(layer_id, config)
+        self.feed_forward = FeedForward(layer_id, config)
         self.attention_norm = RMSNorm(config.dim, eps=config.norm_eps)
         self.ffn_norm = RMSNorm(config.dim, eps=config.norm_eps)
         self.modulation = Modulation(config.dim)
+
+    def reset_parameters(self):
+        self.attention.reset_parameters()
+        self.feed_forward.reset_parameters()
+        self.attention_norm.reset_parameters()
+        self.ffn_norm.reset_parameters()
+        self.modulation.reset_parameters()
     
     def forward(
         self, 
@@ -501,26 +488,26 @@ class TokenFlowBlock(nn.Module):
         freqs_cis: torch.Tensor, 
         use_cache: bool = False
     ) -> torch.Tensor:
-        mod = self.modulation(vec)                        # (B, 2*M, dim)
+        mod = self.modulation(vec) # (B, 2*M, dim)
 
-        B, ctx, D = x.shape
-        x_blk      = x.view(B, -1, self.blk_size, D)       # (B, 2*M, N, D)
-        mod_shift  = mod.shift.unsqueeze(2)                 # (B, 2*M, 1, D)
+        batch_size, ctx = x.shape[0], x.shape[1]
+        x_blk      = x.view(batch_size, -1, self.blk_size, self.dim) # (B, 2*M, N, D)
+        mod_shift  = mod.shift.unsqueeze(2)  # (B, 2*M, 1, D)
         mod_scale  = mod.scale.unsqueeze(2)
-        mod_gate   = mod.gate .unsqueeze(2)                 # idem
+        mod_gate   = mod.gate .unsqueeze(2)
 
         x_mod = (1 + mod_scale) * self.attention_norm(x_blk) + mod_shift
-        x_mod_flat = x_mod.view(B, ctx, D)                  # (B, ctx, D)
+        x_mod_flat = x_mod.view(batch_size, ctx, self.dim)                  # (B, ctx, D)
         h = x + self.attention(x_mod_flat, start_pos, freqs_cis, use_cache)
 
         ffn_out_blk = self.feed_forward(self.ffn_norm(h)).view(
-            B, -1, self.blk_size, D
+            batch_size, -1, self.blk_size, self.dim
         )                                                   # (B, 2*M, N, D)
 
-        h_blk  = h.view(B, -1, self.blk_size, D)
+        h_blk  = h.view(batch_size, -1, self.blk_size, self.dim)
         out_blk = h_blk + mod_gate * ffn_out_blk            # broadcast over N
 
-        return out_blk.view(B, ctx, D)
+        return out_blk.view(batch_size, ctx, self.dim)
 
 
 class TokenFlowModel(PreTrainedModel):
@@ -556,11 +543,11 @@ class TokenFlowModel(PreTrainedModel):
         self.time_dim = config.time_dim
         self.tied_word_embeddings = config.tie_word_embeddings
 
-        self.token_embed = NormalizedEmbedding(config.vocab_size, config.dim)
+        self.token_embed = NormalizedEmbedding(config)
         # self.beta_dist = torch.distributions.Beta(torch.tensor(2.0), torch.tensor(5.0))
         self.time_embed = MLPEmbedder(in_dim=self.time_dim, dim=config.dim)
 
-        self.layers = torch.nn.ModuleList()
+        self.layers = nn.ModuleList()
         for layer_id in range(config.n_layers):
             self.layers.append(TokenFlowBlock(layer_id, config))
 
@@ -568,12 +555,8 @@ class TokenFlowModel(PreTrainedModel):
             self.final_layer_norm = nn.LayerNorm(
                 config.dim,
                 eps=config.norm_eps,
-                elementwise_affine=True          # keep it learnable
+                elementwise_affine=True
             )
-            # with torch.no_grad():
-            #     self.final_layer_norm.weight.fill_(0.5)
-            self.output_proj = SharedNormalizedLinear(self.token_embed, bias=False)
-            self._tied_weights_keys = [r"^token_embed\.weight_param$", r"^output_proj\.embed\.weight_param$"]
         else:
             self.final_layer_norm = RMSNorm(config.dim, eps=config.norm_eps)
             self.output_proj = nn.Linear(config.dim, config.vocab_size, bias=False)
@@ -618,17 +601,16 @@ class TokenFlowModel(PreTrainedModel):
 
         logZ = torch.logsumexp(D_scaled, dim=-1, keepdim=True) # (B, seq_len, 1)
 
-        return D_scaled - logZ
+        return D_scaled - logZ 
     
-    
-    # def _tied_weights_keys(self):
-    #     """
-    #     Return a list whose elements are *sets* of parameter names that
-    #     share the very same storage.  The saver compares its findings
-    #     against this list and raises if they diverge.
-    #     """
-    #     return [{"token_embed.weight", "output_proj.weight"}]
-    
+    def reset_parameters(self):
+        self.token_embed.reset_parameters()
+        self.time_embed.reset_parameters()
+        for layer in self.layers:
+            layer.reset_parameters()
+        self.final_layer_norm.reset_parameters()
+        if not self.tied_word_embeddings:
+            self.output_proj.reset_parameters()
 
     def forward(
         self, 
