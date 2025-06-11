@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -J olmo
-#SBATCH -t 12:00:00
+#SBATCH -t 50:00:00
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:8        # Request 8 GPUs on the node
 #SBATCH --ntasks-per-node=8                  # 1 task per GPU

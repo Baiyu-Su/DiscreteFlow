@@ -10,7 +10,7 @@ from transformers import (
     LlamaTokenizer,
     TrainingArguments,
     Trainer,
-    AutoModel,
+    TrainerCallback
 )
 import torch
 import torch.nn as nn
@@ -18,26 +18,74 @@ import torch.nn as nn
 from datasets import load_dataset
 from loguru import logger
 from pprint import pformat
-from dataclasses import asdict
 
-from model import TokenFlowModel, TokenFlowConfig
+from model import TokenFlowModel, TokenFlowConfig, RMSNorm, NormalizedEmbedding
 from dataloader import DataCollatorPretrainFlow
 
 
-def load_pretrained_embedding(cfg, model):
-    base_model = AutoModel.from_pretrained(
-        cfg.llama_checkpoint,
-        trust_remote_code=True,
-        device_map="cpu"  # load on CPU to avoid GPU memory spike
-    )
-    pretrained_token_embedding = base_model.get_input_embeddings()
-    with torch.no_grad():
-        model.token_embed.weight[:32000, :] = pretrained_token_embedding.weight[:32000, :]
-        nn.init.normal_(model.token_embed.weight[32000, :], mean=0.0, std=0.02)
+class StatsLoggingCallback(TrainerCallback):
+    """
+    Logs, every logging step:
+      • RMS & max‑abs of every nn.LayerNorm / RMSNorm weight (layernorms/…)
+      • RMS & max‑abs of model_logits & singular_logits (logits/…)
+    """
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+        self._grad_stats = {}
 
-    del base_model
-    del pretrained_token_embedding
-    return model
+        # A closure that captures the parameter name and stores its grad stats
+        def make_hook(name):
+            def hook(grad):
+                if grad is not None:
+                    # This hook is called during the backward pass
+                    detached_grad = grad.detach()
+                    self._grad_stats[f"grads/{name}_rms"] = detached_grad.pow(2).mean().sqrt().item()
+                    self._grad_stats[f"grads/{name}_max"] = detached_grad.abs().max().item()
+            return hook
+
+        # Register the hook for each relevant parameter
+        for name, module in self.model.named_modules():
+            if isinstance(module, (nn.LayerNorm, RMSNorm, NormalizedEmbedding)):
+                if hasattr(module, 'weight') and module.weight is not None:
+                    # The hook will be named after the module's weight parameter
+                    param_name = f"{name}.weight"
+                    module.weight.register_hook(make_hook(param_name))
+                elif hasattr(module, 'raw_weight') and module.raw_weight is not None:
+                    # The hook will be named after the module's weight parameter
+                    param_name = f"{name}.raw_weight"
+                    module.weight.register_hook(make_hook(param_name))
+
+    # on_train_batch_end is no longer needed for gradients
+    # def on_train_batch_end(...):
+
+    def on_step_end(self, args, state, control, **kwargs):
+        # Respect the Trainer’s should_log and only on rank 0
+        if not control.should_log or args.process_index != 0:
+            return
+
+        logs = {}
+
+        # Log logits stats if they exist
+        logits_stats = getattr(self.model, "_logits_stats", None)
+        if logits_stats is not None:
+            logs.update(logits_stats)
+
+        # Log layernorm weight stats
+        for name, module in self.model.named_modules():
+            if isinstance(module, (nn.LayerNorm, RMSNorm)):
+                if hasattr(module, 'weight') and module.weight is not None:
+                    w = module.weight.data
+                    logs[f"layernorms/{name}_rms"] = w.pow(2).mean().sqrt().item()
+                    logs[f"layernorms/{name}_max"] = w.abs().max().item()
+
+        # Log the gradient stats collected by the hooks and then clear them
+        if self._grad_stats:
+            logs.update(self._grad_stats)
+            self._grad_stats = {}
+
+        if logs:
+            wandb.log(logs, step=state.global_step)
 
 
 def main():
@@ -58,8 +106,6 @@ def main():
     cfg = config_module.MyConfig
     
     tokenizer = LlamaTokenizer.from_pretrained("./.hf_llama")
-    if tokenizer.pad_token is None:
-        tokenizer.add_special_tokens({"pad_token": "<pad>"})
 
     # your paths
     CACHE_DIR  = "/mnt/weka/home/lzchen/bscode/.hf/datasets"
@@ -101,7 +147,6 @@ def main():
         num_proc=16,
         cache_file_name=DISK_TRAIN
     )
-
     validation_data = valid_raw.map(
         tokenize_function,
         batched=True,
@@ -109,34 +154,33 @@ def main():
         num_proc=16,
         cache_file_name=DISK_VALID
     )
-    
-    data_collator = DataCollatorPretrainFlow(tokenizer=tokenizer, ctx_len=cfg.M*cfg.N, N=cfg.N)
+    data_collator = DataCollatorPretrainFlow(tokenizer=tokenizer, ctx_len=cfg.blk_num*cfg.blk_size, blk_size=cfg.blk_size)
 
     model_config = TokenFlowConfig(
-        is_inference=False,
-        M=cfg.M,
-        N=cfg.N,
-        vocab_size=32001,
+        blk_num=cfg.blk_num,
+        blk_size=cfg.blk_size,
+        vocab_size=cfg.vocab_size,
         dim=cfg.dim,
         n_heads=cfg.n_heads,
         n_layers=cfg.n_layers,
+        tie_word_embeddings=cfg.tie_word_embeddings,
+        load_stats=cfg.load_stats,
     )
 
     model = TokenFlowModel(model_config)
-    model = load_pretrained_embedding(cfg, model)
-
 
     training_args = TrainingArguments(
         output_dir=cfg.output_dir,
         overwrite_output_dir=True,
         do_train=True,
-        do_eval=False,
+        do_eval=True,
         eval_strategy="steps",
         eval_steps=cfg.eval_steps,
         bf16=True,
         learning_rate=cfg.learning_rate,
         adam_beta2=cfg.adam_beta2,
         weight_decay=cfg.weight_decay,
+        max_grad_norm=1.0,
         lr_scheduler_type=cfg.lr_scheduler_type,
         warmup_steps=cfg.warmup_steps,
         save_strategy="steps",
@@ -211,10 +255,12 @@ def main():
         train_dataset=train_data,
         eval_dataset=validation_data,
         data_collator=data_collator,
+        compute_metrics=None,
+        callbacks=[StatsLoggingCallback(model)],
     )
 
     if training_args.process_index == 0:
-        logger.info("The training begins.")
+        logger.info("Let the training begin.")
     
     trainer.train()
     trainer.save_model()
@@ -225,5 +271,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 

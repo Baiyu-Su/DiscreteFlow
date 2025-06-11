@@ -1,8 +1,10 @@
 import math
 import torch
 import torch.nn as nn
+from torch.nn.attention.flex_attention import create_block_mask
 
 from typing import Tuple, Optional
+
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     """
@@ -141,78 +143,94 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     )
 
 
-def build_training_mask(M: int, N: int):
+def build_training_block_mask(blk_num: int, blk_size: int, device=None):
     """
-    Returns a mask of shape (2*M*N, 2*M*N),
-    where 0 => can attend, -inf => block.
+    Returns a *BlockMask* object (not a tensor) for FlexAttention.
+    The pattern exactly matches your old dense mask logic.
+
+    Part_1  (first  blk_num blocks)  : causal (lower-tri).
+    Part_2  (second blk_num blocks) : block-diagonal.
+    Part_2 → Part_1                 : allowed only if
+                                      block_id_row > block_id_col + blk_num.
     """
-    total_seq = 2 * M * N
-    mask = torch.full((total_seq, total_seq), float("-inf"), dtype=torch.bfloat16)
+    def mask_mod(b, h, q_idx, kv_idx):
+        block_id_row = q_idx // blk_size
+        block_id_col = kv_idx // blk_size
+        row_is_p1    = block_id_row < blk_num
+        col_is_p1    = block_id_col < blk_num
 
-    row_ids = torch.arange(total_seq).unsqueeze(-1)
-    col_ids = torch.arange(total_seq).unsqueeze(0)
+        p1p1 = row_is_p1 & col_is_p1 & (block_id_row >= block_id_col)
+        p2p2 = (~row_is_p1) & (~col_is_p1) & (block_id_row == block_id_col)
+        p2p1 = (~row_is_p1) & col_is_p1 & (block_id_row > (block_id_col + blk_num))
+        return p1p1 | p2p2 | p2p1
 
-    block_id_row = row_ids // N
-    block_id_col = col_ids // N
-
-    row_is_part1 = (block_id_row < M)
-    col_is_part1 = (block_id_col < M)
-
-    # Part1->Part1
-    cond_p1p1 = row_is_part1 & col_is_part1 & (block_id_row >= block_id_col)
-    mask[cond_p1p1] = 0.0
-
-    # Part2->Part2
-    cond_p2p2 = (~row_is_part1) & (~col_is_part1) & (block_id_row == block_id_col)
-    mask[cond_p2p2] = 0.0
-
-    # Part2->Part1
-    cond_p2p1 = (~row_is_part1) & col_is_part1 & (block_id_row > (block_id_col + M))
-    mask[cond_p2p1] = 0.0
-
-    return mask
-
-
-def build_inference_mask(start_pos: int, seq_len: int, N: int) -> torch.Tensor:
-    """
-    Build a block causal mask for inference.
-    
-    In this mask:
-      - Both start_pos and seqlen must be multiples of N.
-      - The tokens are conceptually split into blocks of size N.
-      - Tokens within each block see each other (mask=0).
-      - Across blocks, a standard causal mask is applied:
-          For the i-th current block (0-indexed) the allowed blocks are all blocks
-          with global index < (start_pos//N + i + 1).
-    
-    The final mask is built at the block level (shape: (num_current_blocks, total_blocks))
-    and then expanded so that each scalar becomes an N*N sub-matrix.
-    
-    Args:
-        start_pos (int): Number of cached tokens (a multiple of N).
-        seq_len (int): Number of current tokens (a multiple of N).
-        N (int): Block size.
-        device: The torch device to allocate the mask.
-        
-    Returns:
-        torch.Tensor: A mask tensor of shape (seqlen, start_pos + seqlen)
-                      where allowed positions have value 0 and masked positions -inf.
-    """
-    num_cached_blocks = start_pos // N
-    num_current_blocks = seq_len // N
-    total_blocks = num_cached_blocks + num_current_blocks
-
-    block_indices = torch.arange(total_blocks).unsqueeze(0)  # (1, total_blocks)
-    allowed_limit = num_cached_blocks + torch.arange(1, num_current_blocks + 1).unsqueeze(1)  # (num_current_blocks, 1)
-    block_mask = torch.where(
-        block_indices < allowed_limit,
-        torch.tensor(0.0),
-        torch.tensor(float("-inf"))
+    total_tokens = 2 * blk_num * blk_size
+    return create_block_mask(
+        mask_mod,
+        B=None,
+        H=None,
+        Q_LEN=total_tokens,
+        KV_LEN=total_tokens,
+        device=device,
+        BLOCK_SIZE=blk_size,
+        _compile=True,
     )
-    ones_N = torch.ones((N, N))
-    token_mask = torch.kron(block_mask, ones_N)
-    return token_mask
+    
 
+def build_inference_block_mask(max_blk_num: int, blk_size: int, device=None):
+    """
+    Block‑triangular *BlockMask* for inference‑time FlexAttention.
+
+    Each block is completely visible to itself (bidirectional) **and** to
+    every block that comes **before** it, but **never** to a *later* block.
+    If only one block is present, the single block is therefore fully
+    bidirectional, as requested.
+
+    Args
+    ----
+    max_blk_num : int
+        Maximum number of blocks that may appear on the KV side at inference
+        (i.e. ⌈max_seq_len / blk_size⌉).  We build the mask once at this
+        upper bound so it can be reused.
+    blk_size    : int
+        Number of tokens per block.
+    device      : torch.device | str | None
+        GPU/CPU on which the mask will live.  Pass the device of `q`.
+
+    Returns
+    -------
+    BlockMask
+        Ready to be fed to `flex_attention`.
+    """
+
+    #––– predicate evaluated by `create_block_mask` ––––––––––––––––––––––
+    def mask_mod(b, h, q_idx, kv_idx):
+        # Block indices for the query token and the key/value token
+        q_blk = q_idx // blk_size
+        kv_blk = kv_idx // blk_size
+        # Allow iff the query’s block is *not earlier* than the KV’s block
+        return q_blk >= kv_blk
+
+    total_tokens = max_blk_num * blk_size        # square mask (Q = KV)
+
+    return create_block_mask(
+        mask_mod,
+        B=None,                                  # batch‑/head‑agnostic
+        H=None,
+        Q_LEN=total_tokens,
+        KV_LEN=total_tokens,
+        device=device,
+        BLOCK_SIZE=blk_size,
+        _compile=True,
+    )
+    
+    
+def rectified_flow_interpolate(x0, x1, t):
+    xt = t * x1 + (1 - t) * x0
+    t1 = torch.ones_like(t)
+    
+    return torch.cat([x1, xt], dim=1)
+    
 
 def nucleus_cutoff(probs: torch.Tensor, p: float) -> torch.Tensor:
     """
@@ -239,7 +257,7 @@ def nucleus_cutoff(probs: torch.Tensor, p: float) -> torch.Tensor:
     return probs_new
 
 
-def build_time_tensor(time: float, seq_len: int, B: int, N: int) -> torch.Tensor:
+def build_inference_time(time: float, seq_len: int, B: int, N: int) -> torch.Tensor:
     """
     Create a time tensor based on the sequence length and time value.
 
@@ -270,3 +288,8 @@ def build_time_tensor(time: float, seq_len: int, B: int, N: int) -> torch.Tensor
             torch.tensor([time], dtype=torch.float)
         ])
         return row.unsqueeze(0).repeat(B, 1)
+    
+
+def row_rms(w: torch.Tensor, eps: float) -> torch.Tensor:
+    """Compute per‑row RMS with numerical epsilon."""
+    return w.pow(2).mean(dim=1, keepdim=True).add(eps).sqrt()

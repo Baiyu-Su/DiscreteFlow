@@ -11,7 +11,7 @@ from datasets import load_dataset
 from safetensors.torch import load_file
 from transformers import LlamaTokenizer
 
-from model import TokenFlowModel, TokenFlowConfig, timestep_embedding
+from char_bkup.model import TokenFlowModel, TokenFlowConfig, timestep_embedding
 from dataloader import DataCollatorFlow
 
 

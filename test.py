@@ -1,6 +1,6 @@
 import torch
 import matplotlib.pyplot as plt
-from model import build_block_causal_mask
+from char_bkup.model import build_block_causal_mask
 
 def main():
     M = 4
