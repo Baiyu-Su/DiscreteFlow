@@ -126,7 +126,7 @@ class ModulationOut:
 
 
 class Modulation(nn.Module):
-    def __init__(self, dim: int):
+    def __init__(self, config: TokenFlowConfig):
         """
         Initialize the adaLN Modulation layer.
         Args:
@@ -135,7 +135,9 @@ class Modulation(nn.Module):
             w (nn.Linear): Linear transformation for modulation (3 terms).
         """
         super().__init__()
-        self.w = nn.Linear(dim, 3 * dim)
+        self.dim = config.dim
+        self.init_cutoff_factor = config.init_cutoff_factor
+        self.w = nn.Linear(self.dim, 3 * self.dim)
 
     def reset_parameters(self):
         std = 1 / math.sqrt(self.dim)
@@ -155,26 +157,32 @@ class Modulation(nn.Module):
 
 
 class MLPEmbedder(nn.Module):
-    def __init__(self, in_dim: int, dim: int):
+    def __init__(self, config: TokenFlowConfig):
         """
         Initialize the MLPEmbedder module.
         Args:
+            config (TokenFlowConfig): Model configuration parameters.
+        Attributes:
             in_dim (int): Input dimension of time vector.
             dim (int): Model dimension.
-        Attributes:
-            in_layer (nn.Linear): Linear transformation for input.
+            init_cutoff_factor (float): Cutoff factor for weight initialization.
+            wi (nn.Linear): Linear transformation for input.
             silu (nn.SiLU): Swish activation function.
-            out_layer (nn.Linear): Linear transformation for output.
+            wo (nn.Linear): Linear transformation for output.
         """
         super().__init__()
-        self.wi = nn.Linear(in_dim, dim, bias=True)
+        self.in_dim = config.time_dim
+        self.dim = config.dim
+        self.init_cutoff_factor = config.init_cutoff_factor
+        self.wi = nn.Linear(self.in_dim, self.dim, bias=True)
         self.silu = nn.SiLU()
-        self.wo = nn.Linear(dim, dim, bias=True)
+        self.wo = nn.Linear(self.dim, self.dim, bias=True)
 
     def reset_parameters(self):
-        std = 1 / math.sqrt(self.in_dim)
-        init_normal(self.wi, std, self.init_cutoff_factor)
-        init_normal(self.wo, std, self.init_cutoff_factor)
+        in_std = 1 / math.sqrt(self.in_dim)
+        out_std = 1 / math.sqrt(self.dim)
+        init_normal(self.wi, in_std, self.init_cutoff_factor)
+        init_normal(self.wo, out_std, self.init_cutoff_factor)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -471,7 +479,7 @@ class TokenFlowBlock(nn.Module):
         self.feed_forward = FeedForward(layer_id, config)
         self.attention_norm = RMSNorm(config.dim, eps=config.norm_eps)
         self.ffn_norm = RMSNorm(config.dim, eps=config.norm_eps)
-        self.modulation = Modulation(config.dim)
+        self.modulation = Modulation(config)
 
     def reset_parameters(self):
         self.attention.reset_parameters()
@@ -502,10 +510,10 @@ class TokenFlowBlock(nn.Module):
 
         ffn_out_blk = self.feed_forward(self.ffn_norm(h)).view(
             batch_size, -1, self.blk_size, self.dim
-        )                                                   # (B, 2*M, N, D)
+        ) # (B, 2*M, N, D)
 
-        h_blk  = h.view(batch_size, -1, self.blk_size, self.dim)
-        out_blk = h_blk + mod_gate * ffn_out_blk            # broadcast over N
+        h_blk = h.view(batch_size, -1, self.blk_size, self.dim)
+        out_blk = h_blk + mod_gate * ffn_out_blk # broadcast over N
 
         return out_blk.view(batch_size, ctx, self.dim)
 
@@ -517,6 +525,8 @@ class TokenFlowModel(PreTrainedModel):
         Args:
             config (TokenFlowConfig): Model configuration parameters.
         Attributes:
+            config (TokenFlowConfig): Model configuration parameters.
+            load_stats (bool): Whether to load statistics.
             n_layers (int): Number of layers in the model.
             n_heads (int): Number of attention heads.
             blk_num (int): Number of blocks.
@@ -545,7 +555,7 @@ class TokenFlowModel(PreTrainedModel):
 
         self.token_embed = NormalizedEmbedding(config)
         # self.beta_dist = torch.distributions.Beta(torch.tensor(2.0), torch.tensor(5.0))
-        self.time_embed = MLPEmbedder(in_dim=self.time_dim, dim=config.dim)
+        self.time_embed = MLPEmbedder(config)
 
         self.layers = nn.ModuleList()
         for layer_id in range(config.n_layers):
@@ -588,20 +598,19 @@ class TokenFlowModel(PreTrainedModel):
         t_full: (B, seq_len)           -- per-position time
         returns flow_logits of shape (B, seq_len, V)
         """
-        E = self.token_embed.weight
-        vocab_size, dim = E.shape
+        token_embeddings = self.token_embed.weight
 
         xt_norm2 = xt.pow(2).sum(dim=-1, keepdim=True) # (B, seq_len, 1)
-        e_norm2 = E.pow(2).sum(dim=-1).unsqueeze(0).unsqueeze(0)
+        e_norm2 = token_embeddings.pow(2).sum(dim=-1).unsqueeze(0).unsqueeze(0)
 
-        cross = xt @ E.t() # (B, seq_len, V)
-        D = xt_norm2 - 2 * t * cross + (t**2) * e_norm2  # (B, seq_len, V)
+        cross = xt @ token_embeddings.t() # (B, seq_len, V)
+        numer = xt_norm2 - 2 * t * cross + (t**2) * e_norm2  # (B, seq_len, V)
         denom = 2 * (1 - t).pow(2) + eps ** 2 # (B, seq_len, 1)
-        D_scaled = -D / denom # (B, seq_len, V)
+        logits = -numer / denom # (B, seq_len, V)
 
-        logZ = torch.logsumexp(D_scaled, dim=-1, keepdim=True) # (B, seq_len, 1)
+        logZ = torch.logsumexp(logits, dim=-1, keepdim=True) # (B, seq_len, 1)
 
-        return D_scaled - logZ 
+        return logits - logZ 
     
     def reset_parameters(self):
         self.token_embed.reset_parameters()
@@ -621,7 +630,9 @@ class TokenFlowModel(PreTrainedModel):
         **kwargs
     ) -> Union[Tuple, CausalLMOutput]:
         """
-        Forward pass through the TokenFlow model. Depending on the mode (training or inference), it processes the input tokens or embeddings and computes the output logits and loss.
+        Forward pass through the TokenFlow model. 
+        Depending on the mode (training or inference), it processes the input tokens 
+        or embeddings and computes the output logits and loss.
         Args:
             tokens_or_embeds (torch.Tensor): Input tokens or embeddings.
             labels (torch.Tensor, optional): Labels for training mode.
@@ -659,10 +670,9 @@ class TokenFlowModel(PreTrainedModel):
         t_all = torch.cat([torch.ones_like(t_sample), t_sample], dim=1)
         t_full = t_sample.repeat_interleave(self.blk_size, dim=1).unsqueeze(-1)
         
-        x_all = rectified_flow_interpolate(x0, x1, t_full) # [x1, xt]
+        h = rectified_flow_interpolate(x0, x1, t_full) # [x1, xt]
         t_vec = self.time_embed(timestep_embedding(t_all, self.time_dim))
-        xt = x_all[:, -self.blk_num * self.blk_size:] # (batch_size, 2 * blk_num * blk_size, dim)
-        h = x_all
+        xt = h[:, -self.blk_num * self.blk_size:] # (batch_size, 2 * blk_num * blk_size, dim)
 
         for layer in self.layers:
             h = layer(h, t_vec, start_pos, freqs_cis, use_cache=False)
@@ -672,30 +682,12 @@ class TokenFlowModel(PreTrainedModel):
 
         h = h[:, -self.blk_num * self.blk_size:]
         h = self.final_layer_norm(h)
-        model_logits = self.output_proj(h)
-        
+        if self.tied_word_embeddings:
+            model_logits = F.linear(h, self.token_embed.weight, None)
+        else:
+            model_logits = self.output_proj(h)
         singular_logits = self._compute_singular_logits(xt, t_full)
         logits = model_logits + singular_logits
-        
-        # if self.load_stats:           
-        #     with torch.no_grad():
-        #         K = 10
-        #         mdl_flat = model_logits.detach().abs().view(-1, model_logits.size(-1))
-        #         sng_flat = singular_logits.detach().abs().view(-1, singular_logits.size(-1))
-        #         all_flat = logits.detach().abs().view(-1, singular_logits.size(-1))
-
-        #         mdl_topk_mean = mdl_flat.topk(K, dim=-1).values.mean().item()
-        #         sng_topk_mean = sng_flat.topk(K, dim=-1).values.mean().item()
-        #         all_topk_mean = all_flat.topk(K, dim=-1).values.mean().item()
-
-        #         self._logits_stats = {
-        #             "logits/model_top10_mean":     mdl_topk_mean,
-        #             "logits/model_max":           mdl_flat.max().item(),
-        #             "logits/singular_top10_mean":  sng_topk_mean,
-        #             "logits/singular_max":        sng_flat.max().item(),
-        #             "logits/all_top10_mean":  all_topk_mean,
-        #             "logits/all_max":        all_flat.max().item(),
-        #         }
         
         loss = F.cross_entropy(
             logits.view(-1, logits.size(-1)), 
@@ -711,7 +703,7 @@ class TokenFlowModel(PreTrainedModel):
         
 
     @torch.inference_mode()
-    def inference_forward(self, x_all: torch.Tensor, start_pos: int, time: float):
+    def inference_forward(self, h: torch.Tensor, start_pos: int, time: float):
         """
         Forward pass for inference mode.
         Args:   
@@ -721,26 +713,28 @@ class TokenFlowModel(PreTrainedModel):
         Returns:    
             dict: Output logits.
         """
-        batch_size, seq_len = x_all.shape[0], x_all.shape[1]
+        batch_size, seq_len = h.shape[0], h.shape[1]
         assert seq_len % self.blk_size == 0, f"Sequence length {seq_len} is not a multiple of block size {self.N}"
         assert start_pos is not None, "Inference mode requires start_pos."
         assert time is not None, "Inference mode requires time."
 
-        freqs_cis = self._rope_cache(x_all.device)
+        freqs_cis = self._rope_cache(h.device)
         freqs_cis = freqs_cis[start_pos: start_pos + seq_len]
-        t_all = build_inference_time(time, seq_len, batch_size, self.blk_size).to(x_all.device)
+        t_all = build_inference_time(time, seq_len, batch_size, self.blk_size).to(h.device)
         t_vec = self.time_embed(timestep_embedding(t_all, self.time_dim))
-        t_full = torch.full((batch_size, self.blk_size), time, device=x_all.device).unsqueeze(-1)
+        t_full = torch.full((batch_size, self.blk_size), time, device=h.device).unsqueeze(-1)
 
-        xt = x_all[:, -self.blk_size:]
-        h = x_all
+        xt = h[:, -self.blk_size:]
 
         for layer in self.layers:
             h = layer(h, t_vec, start_pos, freqs_cis, use_cache=True)
         
         h = h[:, -self.blk_size:]
         h = self.final_layer_norm(h)
-        model_logits = self.output_proj(h)
+        if self.tied_word_embeddings:
+            model_logits = F.linear(h, self.token_embed.weight, None)
+        else:
+            model_logits = self.output_proj(h)
         
         singular_logits = self._compute_singular_logits(xt, t_full)
         logits = model_logits + singular_logits
