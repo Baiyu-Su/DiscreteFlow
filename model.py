@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import List, Tuple, Optional
 from collections import OrderedDict
 import math
+import functools
 
 import torch
 import torch.nn as nn
@@ -14,7 +15,8 @@ from transformers.modeling_outputs import CausalLMOutput
 
 from typing import Tuple, Optional, Union
 
-from utils import (
+from model_utils import (
+    init_normal,
     precompute_freqs_cis,
     apply_rotary_emb,
     build_training_block_mask,
@@ -40,6 +42,7 @@ class TokenFlowConfig(PretrainedConfig):
         n_heads: int = 16,
         n_kv_heads: Optional[int] = None,
         n_layers: int = 12,
+        init_cutoff_factor: float = 3.0,
         tie_word_embeddings = True,
         rope_scaling: int = 10000,
         multiple_of: int = 64,
@@ -58,6 +61,7 @@ class TokenFlowConfig(PretrainedConfig):
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads or n_heads
         self.n_layers = n_layers
+        self.init_cutoff_factor = init_cutoff_factor
         self.tie_word_embeddings = tie_word_embeddings
         self.rope_scaling = rope_scaling
         self.multiple_of = multiple_of
@@ -104,6 +108,13 @@ class RMSNorm(nn.Module):
 
 @dataclass
 class ModulationOut:
+    """
+    Output of the adaLN Modulation layer.
+    Attributes:
+        shift (torch.Tensor): Shift parameter for modulation.
+        scale (torch.Tensor): Scale parameter for modulation.
+        gate (torch.Tensor): Gate parameter for modulation.
+    """
     shift: torch.Tensor  # shape: (B, M, dim)
     scale: torch.Tensor  # shape: (B, M, dim)
     gate:  torch.Tensor  # shape: (B, M, dim)
@@ -163,18 +174,36 @@ class MLPEmbedder(nn.Module):
 
 
 class Attention(nn.Module):
-    """Multi-head attention w/ rotary positional encodings + FlexAttention."""
+    """
+    Multi-head attention w/ rotary positional encodings + FlexAttention.
+    Args:
+        config (TokenFlowConfig): Model configuration parameters.
+    Attributes:
+        n_kv_heads (int): Number of key/value heads.
+        n_heads (int): Number of attention heads.
+        head_dim (int): Dimension size of each attention head.
+        blk_size (int): Block size.
+        blk_num (int): Number of blocks.
+        wq (nn.Linear): Linear transformation for query.
+        wk (nn.Linear): Linear transformation for key.
+        wv (nn.Linear): Linear transformation for value.
+        wo (nn.Linear): Linear transformation for output.
+        _flex_attn (function): FlexAttention function.
+    """
 
-    def __init__(self, config: TokenFlowConfig):
+    def __init__(self, layer_id: int, config: TokenFlowConfig):
         super().__init__()
+        self.layer_id = layer_id
         self.n_kv_heads = config.n_heads if config.n_kv_heads is None else config.n_kv_heads
-        self.n_heads    = config.n_heads
-        self.head_dim   = config.dim // config.n_heads
-        self.blk_size   = config.blk_size
-        self.blk_num    = config.blk_num          # Needed by mask_mod
+        self.n_heads = config.n_heads
+        self.dim = config.dim
+        self.head_dim = config.dim // config.n_heads
+        self.blk_size = config.blk_size
+        self.blk_num = config.blk_num
+        self.init_cutoff_factor = config.init_cutoff_factor
 
         # Projections ---------------------------------------------------------
-        self.wq = nn.Linear(config.dim, self.n_heads    * self.head_dim, bias=False)
+        self.wq = nn.Linear(config.dim, self.n_heads * self.head_dim, bias=False)
         self.wk = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wv = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(config.n_heads * self.head_dim, config.dim, bias=False)
@@ -185,12 +214,8 @@ class Attention(nn.Module):
             )
         else:
             _tile_sz = config.blk_size
-            def _flex_small(q, k, v, block_mask, scale, enable_gqa, _ts=_tile_sz):
-                opts = {
-                    "BLOCK_M":  _ts, "BLOCK_N":  _ts,
-                    "BLOCK_M1": _ts, "BLOCK_N1": _ts,
-                    "BLOCK_M2": _ts, "BLOCK_N2": _ts,
-                }
+
+            def _flex_small(q, k, v, block_mask, scale, enable_gqa, opts):
                 return flex_attention(
                     q, k, v,
                     block_mask=block_mask,
@@ -198,16 +223,32 @@ class Attention(nn.Module):
                     enable_gqa=enable_gqa,
                     kernel_options=opts,
                 )
-            self._flex_attn = torch.compile(
+            _compiled_flex_small = torch.compile(
                 _flex_small,
                 fullgraph=True,
                 mode="max-autotune-no-cudagraphs"
             )
+            _kernel_opts = {
+                "BLOCK_M":  _tile_sz, "BLOCK_N":  _tile_sz,
+                "BLOCK_M1": _tile_sz, "BLOCK_N1": _tile_sz,
+                "BLOCK_M2": _tile_sz, "BLOCK_N2": _tile_sz,
+            }
+
+            self._flex_attn = functools.partial(_compiled_flex_small, opts=_kernel_opts)
 
         self._block_mask_cache: dict[torch.device, "BlockMask"] = {}
         
         self.register_buffer("cache_k", torch.empty(0), persistent=False)
         self.register_buffer("cache_v", torch.empty(0), persistent=False)
+
+    def reset_parameters(self):
+        std = 1 / math.sqrt(self.dim)
+        attn_out_std = 1 / (math.sqrt(2 * self.dim * (self.layer_id + 1)))
+
+        init_normal(self.wq, std, self.init_cutoff_factor)
+        init_normal(self.wk, std, self.init_cutoff_factor)
+        init_normal(self.wv, std, self.init_cutoff_factor)
+        init_normal(self.wo, attn_out_std, self.init_cutoff_factor)
 
     def forward(self, x: Tensor, start_pos: int, freqs_cis, use_cache=False):
         """
@@ -247,6 +288,7 @@ class Attention(nn.Module):
                 block_mask=block_mask,    # block‑sparse causal mask
                 scale=1.0 / math.sqrt(self.head_dim),
                 enable_gqa=(self.n_kv_heads != self.n_heads),
+                opts=self._flex_attn_opts
             )        
         else:
             end_pos = start_pos + seq_len
@@ -289,28 +331,37 @@ class Attention(nn.Module):
 class FeedForward(nn.Module):
     def __init__(
         self,
-        dim: int,
-        hidden_dim: int,
-        multiple_of: int,
+        layer_id: int,
+        config: TokenFlowConfig,
     ):
         """
         Initialize the FeedForward module.
         Args:
-            dim (int): Input dimension.
-            hidden_dim (int): Hidden dimension of the feedforward layer.
-            multiple_of (int): Value to ensure hidden dimension is a multiple of this value.
+            layer_id (int): Identifier for the layer.
+            config (TokenFlowConfig): Model configuration parameters.
         Attributes:
             w1 (nn.Linear): Linear transformation for the first layer.
-            w2 (RowParallelLinear): Linear transformation for the second layer.
+            w2 (nn.Linear): Linear transformation for the second layer.
             w3 (nn.Linear): Linear transformation for the third layer.
         """
         super().__init__()
+        self.layer_id = layer_id
+        self.dim = config.dim
+        self.multiple_of = config.multiple_of
+        self.init_cutoff_factor = config.init_cutoff_factor
 
-        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+        hidden_dim = self.multiple_of * ((self.dim + self.multiple_of - 1) // self.multiple_of)
 
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w1 = nn.Linear(self.dim, hidden_dim, bias=False)
+        self.w2 = nn.Linear(hidden_dim, self.dim, bias=False)
+        self.w3 = nn.Linear(self.dim, hidden_dim, bias=False)
+
+    def reset_parameters(self):
+        std = 1 / math.sqrt(self.dim)
+        ff_out_std = 1 / (math.sqrt(2 * self.dim * (self.layer_id + 1)))
+        init_normal(self.w1, std, self.init_cutoff_factor)
+        init_normal(self.w2, std, self.init_cutoff_factor)
+        init_normal(self.w3, ff_out_std, self.init_cutoff_factor)
 
     def forward(self, x):
         """
@@ -383,9 +434,6 @@ class NormalizedEmbedding(nn.Module):
                 state_dict[key] = t  # already normalised
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
-    # ------------------------------------------------------------------
-    # Init
-    # ------------------------------------------------------------------
     def reset_parameters(self) -> None:  # noqa: D401
         nn.init.normal_(self.raw_weight, mean=0.0, std=1.0 / math.sqrt(self.raw_weight.size(1)))
         if self.padding_idx is not None:
@@ -445,7 +493,14 @@ class TokenFlowBlock(nn.Module):
         self.ffn_norm = RMSNorm(config.dim, eps=config.norm_eps)
         self.modulation = Modulation(config.dim)
     
-    def forward(self, x, vec, start_pos, freqs_cis, use_cache=False):
+    def forward(
+        self, 
+        x: torch.Tensor, 
+        vec: torch.Tensor, 
+        start_pos: int, 
+        freqs_cis: torch.Tensor, 
+        use_cache: bool = False
+    ) -> torch.Tensor:
         mod = self.modulation(vec)                        # (B, 2*M, dim)
 
         B, ctx, D = x.shape
@@ -454,13 +509,10 @@ class TokenFlowBlock(nn.Module):
         mod_scale  = mod.scale.unsqueeze(2)
         mod_gate   = mod.gate .unsqueeze(2)                 # idem
 
-        # ---- attention -----------------------------------------------------
         x_mod = (1 + mod_scale) * self.attention_norm(x_blk) + mod_shift
         x_mod_flat = x_mod.view(B, ctx, D)                  # (B, ctx, D)
-
         h = x + self.attention(x_mod_flat, start_pos, freqs_cis, use_cache)
 
-        # ---- feed‑forward with gating --------------------------------------
         ffn_out_blk = self.feed_forward(self.ffn_norm(h)).view(
             B, -1, self.blk_size, D
         )                                                   # (B, 2*M, N, D)

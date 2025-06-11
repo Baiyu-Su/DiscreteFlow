@@ -12,7 +12,7 @@ from transformers.modeling_outputs import CausalLMOutput
 
 from typing import Tuple, Optional, Union
 
-from utils import (
+from model_utils import (
     precompute_freqs_cis,
     apply_rotary_emb,
     build_training_mask,

@@ -3,7 +3,33 @@ import torch
 import torch.nn as nn
 from torch.nn.attention.flex_attention import create_block_mask
 
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Union
+
+
+def init_normal(
+    module: Union[nn.Linear, nn.Embedding],
+    std: float,
+    init_cutoff_factor: Optional[float] = None,
+):
+    """
+    Initialize the weights of a module using a normal distribution.
+    Args:
+        module (Union[nn.Linear, nn.Embedding]): The module to initialize.
+        std (float): The standard deviation of the normal distribution.
+        init_cutoff_factor (Optional[float]): The cutoff factor for truncated normal distribution.
+    Returns:
+        None
+    """
+    # weights
+    if init_cutoff_factor is not None:
+        cutoff_value = init_cutoff_factor * std
+        nn.init.trunc_normal_(module.weight, mean=0.0, std=std, a=-cutoff_value, b=cutoff_value)
+    else:
+        nn.init.normal_(module.weight, mean=0.0, std=std)
+
+    # biases
+    if isinstance(module, nn.Linear) and module.bias is not None:
+        nn.init.zeros_(module.bias)
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -29,7 +55,7 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     return freqs_cis
 
 
-def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
+def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     """
     Reshape frequency tensor for broadcasting it with another tensor.
 

@@ -7,7 +7,7 @@ import wandb
 from torch.utils.data import DataLoader
 
 from transformers import (
-    LlamaTokenizer,
+    PreTrainedTokenizerFast,
     TrainingArguments,
     Trainer,
     TrainerCallback
@@ -105,12 +105,12 @@ def main():
     spec.loader.exec_module(config_module)
     cfg = config_module.MyConfig
     
-    tokenizer = LlamaTokenizer.from_pretrained("./.hf_llama")
+    tokenizer = PreTrainedTokenizerFast.from_pretrained("/scratch/10152/baiyusu/projects/DiscreteFlow/.hf_llama")
 
     # your paths
-    CACHE_DIR  = "/mnt/weka/home/lzchen/bscode/.hf/datasets"
-    DISK_TRAIN = "/mnt/weka/home/lzchen/bscode/fineweb_10b/train.arrow"
-    DISK_VALID = "/mnt/weka/home/lzchen/bscode/fineweb_10b/valid.arrow"
+    CACHE_DIR  = "/scratch/10152/baiyusu/.hf/datasets"
+    DISK_TRAIN = "/scratch/10152/baiyusu/refinedweb/train.arrow"
+    DISK_VALID = "/scratch/10152/baiyusu/refinedweb/valid.arrow"
 
     # make sure parent exists
     Path(DISK_TRAIN).parent.mkdir(parents=True, exist_ok=True)
@@ -119,11 +119,9 @@ def main():
     os.environ["HF_DATASETS_CACHE"]  = CACHE_DIR
     os.environ["TRANSFORMERS_CACHE"] = str(Path(CACHE_DIR).parent / "hf_models")
 
-    # 1) download + shuffle + split (all cached by HF under CACHE_DIR)
     raw = load_dataset(
-        "HuggingFaceFW/fineweb",
-        "sample-10BT",
-        split="train",
+        "tiiuae/falcon-refinedweb",
+        split="train[:20%]",
         cache_dir=CACHE_DIR,
         streaming=False,
     ).shuffle(seed=42)
@@ -133,27 +131,32 @@ def main():
     valid_raw = split["test"]
 
     # 2) tokenize → write to DISK_{TRAIN,VALID}.arrow on first run, skip thereafter
+    # The text column in falcon-refinedweb is "content"
     def tokenize_function(examples):
         return tokenizer(
-            examples["text"],
+            examples["content"],
             truncation=True,
             max_length=1024,
         )
 
+    # Get original columns to remove them from the dataset after tokenization
+    original_columns = train_raw.column_names
+
     train_data = train_raw.map(
         tokenize_function,
         batched=True,
-        remove_columns=["text"],
-        num_proc=16,
+        remove_columns=original_columns, # remove all original columns
+        num_proc=16,                     # 16 workers for preprocessing
         cache_file_name=DISK_TRAIN
     )
     validation_data = valid_raw.map(
         tokenize_function,
         batched=True,
-        remove_columns=["text"],
-        num_proc=16,
+        remove_columns=original_columns, # remove all original columns
+        num_proc=16,                     # 16 workers for preprocessing
         cache_file_name=DISK_VALID
     )
+
     data_collator = DataCollatorPretrainFlow(tokenizer=tokenizer, ctx_len=cfg.blk_num*cfg.blk_size, blk_size=cfg.blk_size)
 
     model_config = TokenFlowConfig(
