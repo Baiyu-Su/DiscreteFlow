@@ -252,10 +252,7 @@ def build_inference_block_mask(max_blk_num: int, blk_size: int, device=None):
     
     
 def rectified_flow_interpolate(x0, x1, t):
-    xt = t * x1 + (1 - t) * x0
-    t1 = torch.ones_like(t)
-    
-    return torch.cat([x1, xt], dim=1)
+    return t * x1 + (1 - t) * x0
     
 
 def nucleus_cutoff(probs: torch.Tensor, p: float) -> torch.Tensor:

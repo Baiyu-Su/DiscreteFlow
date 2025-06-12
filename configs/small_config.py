@@ -1,15 +1,14 @@
 class MyConfig:
-    blk_num = 32
-    blk_size = 32
+    ctx_len = 1024
 
-    output_dir = "./out_small_32"
-    run_name = "small_run_32"
+    output_dir = "./out_small_causal"
+    run_name = "small_run_causal"
     load_stats = True
 
     # Model config
     vocab_size = 32000
     dim = 768
-    n_heads = 6 # Head dim must be divisible by 128
+    n_heads = 12 # Head dim must be divisible by 128
     n_layers = 12
     tie_word_embeddings = True
     

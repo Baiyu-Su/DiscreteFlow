@@ -6,7 +6,6 @@ import functools
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.attention.flex_attention import flex_attention, BlockMask
 from torch import Tensor
 
 from transformers import PreTrainedModel, PretrainedConfig
@@ -18,11 +17,8 @@ from model_utils import (
     init_normal,
     precompute_freqs_cis,
     apply_rotary_emb,
-    build_training_block_mask,
-    build_inference_block_mask,
     timestep_embedding,
     rectified_flow_interpolate,
-    build_inference_time,
 )
 
 
@@ -31,8 +27,7 @@ class TokenFlowConfig(PretrainedConfig):
 
     def __init__(
         self,
-        blk_num: int = 128,
-        blk_size: int = 8,
+        ctx_len: int = 1024,
         max_batch: int = 64,
         vocab_size: int = 32000,
         dim: int = 1024,
@@ -52,8 +47,7 @@ class TokenFlowConfig(PretrainedConfig):
     ):
         super().__init__(**kwargs)
 
-        self.blk_num = blk_num
-        self.blk_size = blk_size
+        self.ctx_len = ctx_len
         self.max_batch = max_batch
         self.vocab_size = vocab_size
         self.dim = dim
@@ -197,20 +191,17 @@ class MLPEmbedder(nn.Module):
 
 class Attention(nn.Module):
     """
-    Multi-head attention w/ rotary positional encodings + FlexAttention.
+    Multi-head attention w/ rotary positional encodings + Flash Attention 2.
     Args:
         config (TokenFlowConfig): Model configuration parameters.
     Attributes:
         n_kv_heads (int): Number of key/value heads.
         n_heads (int): Number of attention heads.
         head_dim (int): Dimension size of each attention head.
-        blk_size (int): Block size.
-        blk_num (int): Number of blocks.
         wq (nn.Linear): Linear transformation for query.
         wk (nn.Linear): Linear transformation for key.
         wv (nn.Linear): Linear transformation for value.
         wo (nn.Linear): Linear transformation for output.
-        _flex_attn (function): FlexAttention function.
     """
 
     def __init__(self, layer_id: int, config: TokenFlowConfig):
@@ -220,8 +211,7 @@ class Attention(nn.Module):
         self.n_heads = config.n_heads
         self.dim = config.dim
         self.head_dim = config.dim // config.n_heads
-        self.blk_size = config.blk_size
-        self.blk_num = config.blk_num
+        self.max_batch = config.max_batch
         self.init_cutoff_factor = config.init_cutoff_factor
 
         self.wq = nn.Linear(config.dim, self.n_heads * self.head_dim, bias=False)
@@ -229,36 +219,6 @@ class Attention(nn.Module):
         self.wv = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(config.n_heads * self.head_dim, config.dim, bias=False)
 
-        if config.blk_size >= 128:
-            self._flex_attn = lambda q, k, v, block_mask, scale, enable_gqa: flex_attention(
-                q, k, v, block_mask=block_mask, scale=scale, enable_gqa=enable_gqa
-            )
-        else:
-            _tile_sz = config.blk_size
-
-            def _flex_small(q, k, v, block_mask, scale, enable_gqa, opts):
-                return flex_attention(
-                    q, k, v,
-                    block_mask=block_mask,
-                    scale=scale,
-                    enable_gqa=enable_gqa,
-                    kernel_options=opts,
-                )
-            _compiled_flex_small = torch.compile(
-                _flex_small,
-                fullgraph=True,
-                mode="max-autotune-no-cudagraphs"
-            )
-            _kernel_opts = {
-                "BLOCK_M":  _tile_sz, "BLOCK_N":  _tile_sz,
-                "BLOCK_M1": _tile_sz, "BLOCK_N1": _tile_sz,
-                "BLOCK_M2": _tile_sz, "BLOCK_N2": _tile_sz,
-            }
-
-            self._flex_attn = functools.partial(_compiled_flex_small, opts=_kernel_opts)
-
-        self._block_mask_cache: dict[torch.device, "BlockMask"] = {}
-        
         self.register_buffer("cache_k", torch.empty(0), persistent=False)
         self.register_buffer("cache_v", torch.empty(0), persistent=False)
 
@@ -279,8 +239,7 @@ class Attention(nn.Module):
         start_pos  : starting token position in the *full* sequence
                      (needed only for KV-cache path)
         freqs_cis  : rotary embedding tensor
-        _unused_mask : kept for API backward-compat (ignored - masking handled
-                       internally by FlexAttention)
+        use_cache  : whether to use KV caching for inference
         """
         batch_size, seq_len, _ = x.shape
         q, k, v = self.wq(x), self.wk(x), self.wv(x)
@@ -293,59 +252,50 @@ class Attention(nn.Module):
         q, k = apply_rotary_emb(q, k, freqs_cis=freqs_cis)
 
         if not use_cache:
-            q = q.transpose(1, 2)                    # (B, H_q, L, D_h)
-            k = k.transpose(1, 2)                    # (B, H_kv,L, D_h)
+            # Training path: use scaled dot-product attention
+            # Transpose to (B, H, L, D_h) for scaled_dot_product_attention
+            q = q.transpose(1, 2)
+            k = k.transpose(1, 2)
             v = v.transpose(1, 2)
             
-            dev = q.device                                     # q/k/v's GPU
-            if dev not in self._block_mask_cache:              # NEW
-                self._block_mask_cache[dev] = build_training_block_mask(
-                    self.blk_num, self.blk_size, device=dev
-                )
-            block_mask = self._block_mask_cache[dev] 
-
-            out = self._flex_attn(
+            out = F.scaled_dot_product_attention(
                 q, k, v,
-                block_mask=block_mask,    # block‑sparse causal mask
-                scale=1.0 / math.sqrt(self.head_dim),
-                enable_gqa=(self.n_kv_heads != self.n_heads),
-                opts=self._flex_attn_opts
-            )        
+                is_causal=True,
+                scale=1.0 / math.sqrt(self.head_dim)
+            )
+            # Transpose back to (B, L, H, D_h)
+            out = out.transpose(1, 2)
         else:
+            # Inference path with KV caching
             end_pos = start_pos + seq_len
             
             if self.cache_k.numel() == 0 or self.cache_k.size(1) < end_pos:
-                max_len = self.blk_num * self.blk_size
-                shape   = (self.blk_size, max_len, self.n_kv_heads, self.head_dim)
+                max_len = self.ctx_len
+                shape   = (self.max_batch, max_len, self.n_kv_heads, self.head_dim)
                 self.cache_k = torch.zeros(shape, device=x.device, dtype=k.dtype)
                 self.cache_v = torch.zeros_like(self.cache_k)
                 
             self.cache_k[:batch_size, start_pos:end_pos] = k
             self.cache_v[:batch_size, start_pos:end_pos] = v
 
-            k_full = self.cache_k[:batch_size, :end_pos]      # (B, T, H_kv, D_h)
+            k_full = self.cache_k[:batch_size, :end_pos]
             v_full = self.cache_v[:batch_size, :end_pos]
 
-            q = q.transpose(1, 2)                    # (B, H_q, L,  D_h)
-            k = k_full.transpose(1, 2)               # (B, H_kv,T, D_h)
-            v = v_full.transpose(1, 2)
-            
-            dev = q.device                                     # q/k/v's GPU
-            if dev not in self._block_mask_cache:              # NEW
-                self._block_mask_cache[dev] = build_inference_block_mask(
-                    self.blk_num, self.blk_size, device=dev
-                )
-            block_mask = self._block_mask_cache[dev] 
+            # Transpose to (B, H, L, D_h) for scaled_dot_product_attention
+            q = q.transpose(1, 2)
+            k_full = k_full.transpose(1, 2)
+            v_full = v_full.transpose(1, 2)
 
-            out = self._flex_attn(
-                q, k, v,
-                block_mask=block_mask._adjust(q.shape[-2], k.shape[-2]),                     # causal via cache
-                scale=1.0 / math.sqrt(self.head_dim),
-                enable_gqa=(self.n_kv_heads != self.n_heads),
+            out = F.scaled_dot_product_attention(
+                q, k_full, v_full,
+                is_causal=True,
+                scale=1.0 / math.sqrt(self.head_dim)
             )
+            # Transpose back to (B, L, H, D_h)
+            out = out.transpose(1, 2)
 
-        # (B, L, H, D_h) → (B, L, D)
-        out = out.transpose(1, 2).reshape(batch_size, seq_len, -1)
+        # (B, L, D)
+        out = out.reshape(batch_size, seq_len, -1)
         return self.wo(out)
 
 
@@ -466,7 +416,6 @@ class TokenFlowBlock(nn.Module):
             layer_id (int): Identifier for the layer.
             config (TokenFlowConfig): Model configuration parameters.
         Attributes:
-            blk_size (int): Block size.
             attention (Attention): Attention module.
             feed_forward (FeedForward): FeedForward module.
             attention_norm (RMSNorm): Layer normalization for attention output.
@@ -474,7 +423,6 @@ class TokenFlowBlock(nn.Module):
             modulation (Modulation): adaLN modulation module.
         """
         super().__init__()
-        self.blk_size = config.blk_size
         self.attention = Attention(layer_id, config)
         self.feed_forward = FeedForward(layer_id, config)
         self.attention_norm = RMSNorm(config.dim, eps=config.norm_eps)
@@ -496,26 +444,15 @@ class TokenFlowBlock(nn.Module):
         freqs_cis: torch.Tensor, 
         use_cache: bool = False
     ) -> torch.Tensor:
-        mod = self.modulation(vec) # (B, 2*M, dim)
+        mod = self.modulation(vec) # (B, 1, dim)
 
-        batch_size, ctx = x.shape[0], x.shape[1]
-        x_blk      = x.view(batch_size, -1, self.blk_size, self.dim) # (B, 2*M, N, D)
-        mod_shift  = mod.shift.unsqueeze(2)  # (B, 2*M, 1, D)
-        mod_scale  = mod.scale.unsqueeze(2)
-        mod_gate   = mod.gate .unsqueeze(2)
+        x_mod = (1 + mod.scale) * self.attention_norm(x) + mod.shift
+        h = x + self.attention(x_mod, start_pos, freqs_cis, use_cache)
 
-        x_mod = (1 + mod_scale) * self.attention_norm(x_blk) + mod_shift
-        x_mod_flat = x_mod.view(batch_size, ctx, self.dim)                  # (B, ctx, D)
-        h = x + self.attention(x_mod_flat, start_pos, freqs_cis, use_cache)
+        ffn_out = self.feed_forward(self.ffn_norm(h))
+        out = h + mod.gate * ffn_out # broadcast gate over seq len
 
-        ffn_out_blk = self.feed_forward(self.ffn_norm(h)).view(
-            batch_size, -1, self.blk_size, self.dim
-        ) # (B, 2*M, N, D)
-
-        h_blk = h.view(batch_size, -1, self.blk_size, self.dim)
-        out_blk = h_blk + mod_gate * ffn_out_blk # broadcast over N
-
-        return out_blk.view(batch_size, ctx, self.dim)
+        return out
 
 
 class TokenFlowModel(PreTrainedModel):
@@ -529,8 +466,6 @@ class TokenFlowModel(PreTrainedModel):
             load_stats (bool): Whether to load statistics.
             n_layers (int): Number of layers in the model.
             n_heads (int): Number of attention heads.
-            blk_num (int): Number of blocks.
-            blk_size (int): Block size.
             max_batch (int): Maximum batch size for inference.
             dim (int): Model dimension.
             time_dim (int): Dimension of the time vector.
@@ -544,10 +479,9 @@ class TokenFlowModel(PreTrainedModel):
         super().__init__(config)
         self.config = config
         self.load_stats = config.load_stats
+        self.ctx_len = config.ctx_len
         self.n_layers = config.n_layers
         self.n_heads = config.n_heads
-        self.blk_num = config.blk_num
-        self.blk_size = config.blk_size
         self.max_batch = config.max_batch
         self.dim = config.dim
         self.time_dim = config.time_dim
@@ -555,7 +489,6 @@ class TokenFlowModel(PreTrainedModel):
         self.tied_word_embeddings = config.tie_word_embeddings
 
         self.token_embed = NormalizedEmbedding(config)
-        # self.beta_dist = torch.distributions.Beta(torch.tensor(2.0), torch.tensor(5.0))
         self.time_embed = MLPEmbedder(config)
 
         self.layers = nn.ModuleList()
@@ -573,25 +506,19 @@ class TokenFlowModel(PreTrainedModel):
             self.output_proj = nn.Linear(config.dim, config.vocab_size, bias=False)
             
         freqs_cis = precompute_freqs_cis(
-            self.dim//self.n_heads, self.blk_num*self.blk_size, config.rope_scaling)
+            self.dim//self.n_heads, self.ctx_len, config.rope_scaling)
         self.register_buffer("freqs_cis", freqs_cis, persistent=False)
-    
     
     def _rope_cache(self, device):
         if (not hasattr(self, "_freqs_cis") or self._freqs_cis.device != device):
             freqs_cis = precompute_freqs_cis(
                 self.dim // self.n_heads,
-                self.blk_num * self.blk_size,
+                self.ctx_len,
                 self.config.rope_scaling,
             ).to(device)
             self.register_buffer("_freqs_cis", freqs_cis, persistent=False)
         return self._freqs_cis
-    
-    
-    # @torch._dynamo.disable
-    # def _sample_time(self, shape, device):
-    #     return self.beta_dist.sample(shape).to(device)
-    
+        
         
     def _compute_singular_logits(
         self, 
@@ -667,36 +594,31 @@ class TokenFlowModel(PreTrainedModel):
             dict: Output logits and loss.
         """
         batch_size, seq_len = input_ids.shape
-        assert seq_len % self.blk_size == 0, f"Sequence length {seq_len} is not a multiple of block size {self.blk_size}."
         assert labels is not None, "Training mode requires labels."
 
         start_pos = 0
-        freqs_cis = self._rope_cache(input_ids.device).repeat(2, 1)
+        freqs_cis = self._rope_cache(input_ids.device)
         
         x1 = self.token_embed(input_ids)
         x0 = torch.randn_like(x1) * self.embed_scale
-        # t_sample = self._sample_time((batch_size, self.blk_num), input_ids.device)
-        t_sample = torch.rand((batch_size, self.blk_num), device=input_ids.device)
-        t_all = torch.cat([torch.ones_like(t_sample), t_sample], dim=1)
-        t_full = t_sample.repeat_interleave(self.blk_size, dim=1).unsqueeze(-1)
+        t_sample = torch.rand((batch_size, 1, 1), device=input_ids.device)
         
-        h = rectified_flow_interpolate(x0, x1, t_full) # [x1, xt]
-        t_vec = self.time_embed(timestep_embedding(t_all, self.time_dim))
-        xt = h[:, -self.blk_num * self.blk_size:] # (batch_size, 2 * blk_num * blk_size, dim)
+        h = rectified_flow_interpolate(x0, x1, t_sample)
+        t_vec = self.time_embed(timestep_embedding(t_sample, self.time_dim))
+        xt = h
 
         for layer in self.layers:
             h = layer(h, t_vec, start_pos, freqs_cis, use_cache=False)
 
-        batch_size_, seqlen_ = labels.shape
-        assert batch_size_ == batch_size and seqlen_ == seq_len, f"Labels must match the shape of input {input_ids.shape}. Got {labels.shape}."
+        batch_size_, seq_len_ = labels.shape
+        assert batch_size_ == batch_size and seq_len_ == seq_len, f"Labels must match the shape of input {input_ids.shape}. Got {labels.shape}."
 
-        h = h[:, -self.blk_num * self.blk_size:]
         h = self.final_layer_norm(h)
         if self.tied_word_embeddings:
             model_logits = F.linear(h, self.token_embed.weight, None)
         else:
             model_logits = self.output_proj(h)
-        singular_logits = self._compute_singular_logits(xt, t_full, std=self.embed_scale)
+        singular_logits = self._compute_singular_logits(xt, t_sample, std=self.embed_scale)
         logits = model_logits + singular_logits
         
         loss = F.cross_entropy(
@@ -724,32 +646,29 @@ class TokenFlowModel(PreTrainedModel):
             dict: Output logits.
         """
         batch_size, seq_len = h.shape[0], h.shape[1]
-        assert seq_len % self.blk_size == 0, f"Sequence length {seq_len} is not a multiple of block size {self.N}"
         assert start_pos is not None, "Inference mode requires start_pos."
         assert time is not None, "Inference mode requires time."
 
         freqs_cis = self._rope_cache(h.device)
-        freqs_cis = freqs_cis[start_pos: start_pos + seq_len]
-        t_all = build_inference_time(time, seq_len, batch_size, self.blk_size).to(h.device)
-        t_vec = self.time_embed(timestep_embedding(t_all, self.time_dim))
-        t_full = torch.full((batch_size, self.blk_size), time, device=h.device).unsqueeze(-1)
+        freqs_cis = freqs_cis[start_pos : start_pos + seq_len]
 
-        xt = h[:, -self.blk_size:]
+        t_sample = torch.full((batch_size, 1), time, device=h.device)
+        t_vec = self.time_embed(timestep_embedding(t_sample, self.time_dim))
+        xt = h
 
         for layer in self.layers:
             h = layer(h, t_vec, start_pos, freqs_cis, use_cache=True)
-        
-        h = h[:, -self.blk_size:]
+
         h = self.final_layer_norm(h)
         if self.tied_word_embeddings:
             model_logits = F.linear(h, self.token_embed.weight, None)
         else:
             model_logits = self.output_proj(h)
-        
-        singular_logits = self._compute_singular_logits(xt, t_full, std=self.embed_scale)
+
+        singular_logits = self._compute_singular_logits(xt, t_sample, std=self.embed_scale)
         logits = model_logits + singular_logits
 
-        return {"logits": logits}
+        return CausalLMOutput(logits=logits)
     
     
     @torch.inference_mode()
@@ -775,44 +694,25 @@ class TokenFlowModel(PreTrainedModel):
         """
         assert batch_size <= self.max_batch, f"Generation batch size {batch_size} greater than batch size limit {self.max_batch}."
         assert all(0 <= x <= 1 for x in time_schedule), "Time steps must between 0 and 1."
-        total_len = self.blk_num * self.blk_size
-
-        device = self.token_embed.weight.device
-        tokens = torch.full((batch_size, total_len), bos_id, dtype=torch.long, device=device)
         
-        eos_reached = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        total_len = self.ctx_len
+        device = self.token_embed.weight.device
 
-        prev_pos = 0
-        for cur_pos in range(0, total_len, self.blk_size):
-            x_all = torch.randn(batch_size, self.blk_size, self.dim, device=device) * self.embed_scale
-            if cur_pos - prev_pos > 0:
-                x1 = self.token_embed(tokens[:, prev_pos:cur_pos])
-                x_all = torch.cat([x1, x_all], dim=1)
+        x_t = torch.randn(batch_size, total_len, self.dim, device=device) * self.embed_scale
 
-            for i, (time, next_time) in enumerate(zip(time_schedule[:-1], time_schedule[1:])):
-                logits = self.forward(x_all, start_pos=prev_pos, time=time)["logits"]
-                if i == 0:
-                    prev_pos = cur_pos
-                    x_all = x_all[:, -self.blk_size:]
+        for i, (time, next_time) in enumerate(zip(time_schedule[:-1], time_schedule[1:])):
+            logits = self.inference_forward(x_t, start_pos=0, time=time).logits
+            E = self.token_embed.weight
+            probs = torch.softmax(logits, dim=-1)
+            x1t = torch.matmul(probs, E)
+            alpha = (next_time - time) / (1 - time)
+            x_t.lerp_(x1t, alpha)
+        
+        x1_flat = x_t.reshape(-1, self.dim)
 
-                E = self.token_embed.weight
-                probs = torch.softmax(logits[:, -self.blk_size:], dim=-1)
-                x1t = torch.matmul(probs, E) # \Hat{X1} estimation at time t is exptectation of embedding vectors
-                alpha = (next_time - time) / (1 - time) # (t_{i+1} - t_i) / (1 - t_i)
-                x_all.lerp_(x1t, alpha)
-                
-            x1_flat = x_all.reshape(-1, self.dim)               # (B*N, d)
-
-            dist = torch.cdist(x1_flat, E)         # default is p=2 (Euclidean)
-            closest = dist.argmin(dim=1)           # (B*N,)
-            next_tokens = closest.view(batch_size, self.blk_size)     
-            tokens[:, cur_pos:cur_pos+self.blk_size] = next_tokens
-
-            eos_in_block = (next_tokens == eos_id).any(dim=1)
-            eos_reached |= eos_in_block
-
-            if all(eos_reached):
-                break
+        dist = torch.cdist(x1_flat, self.token_embed.weight)
+        closest = dist.argmin(dim=1)
+        tokens = closest.view(batch_size, total_len)
 
         out_tokens = []
         for i, toks in enumerate(tokens.tolist()):
