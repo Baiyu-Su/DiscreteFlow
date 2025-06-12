@@ -13,10 +13,10 @@ class MyConfig:
     n_layers = 16
     tie_word_embeddings = True
     
-    per_device_train_batch_size = 2
+    per_device_train_batch_size = 4
     gradient_accumulation_steps = 8
     
-    dataloader_num_workers = 32
+    dataloader_num_workers = 12
     max_steps = 40000
     eval_steps = 1000
     save_steps = 2000

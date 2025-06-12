@@ -63,7 +63,7 @@ class TokenFlowConfig(PretrainedConfig):
         self.n_kv_heads = n_kv_heads or n_heads
         self.n_layers = n_layers
         self.init_cutoff_factor = init_cutoff_factor
-        self.embed_scale = embed_scale
+        self.embed_scale = embed_scale or 1.0 / math.sqrt(dim)
         self.tie_word_embeddings = tie_word_embeddings
         self.rope_scaling = rope_scaling
         self.multiple_of = multiple_of
@@ -411,7 +411,7 @@ class NormalizedEmbedding(nn.Module):
             
         self.vocab_size = config.vocab_size
         self.dim = config.dim
-        self.embed_scale = config.embed_scale if config.embed_scale is not None else 1.0 / math.sqrt(self.dim)
+        self.embed_scale = config.embed_scale
         self.padding_idx = None
         self.scale_grad_by_freq = False
         self.sparse = False
@@ -551,6 +551,7 @@ class TokenFlowModel(PreTrainedModel):
         self.max_batch = config.max_batch
         self.dim = config.dim
         self.time_dim = config.time_dim
+        self.embed_scale = config.embed_scale
         self.tied_word_embeddings = config.tie_word_embeddings
 
         self.token_embed = NormalizedEmbedding(config)
@@ -592,11 +593,20 @@ class TokenFlowModel(PreTrainedModel):
     #     return self.beta_dist.sample(shape).to(device)
     
         
-    def _compute_singular_logits(self, xt: torch.Tensor, t: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    def _compute_singular_logits(
+        self, 
+        xt: torch.Tensor, 
+        t: torch.Tensor, 
+        std: float = 1.0, 
+        eps: float = 1e-6
+    ) -> torch.Tensor:
         """
-        xt:     (B, seq_len=M*N, d)
-        t_full: (B, seq_len)           -- per-position time
-        returns flow_logits of shape (B, seq_len, V)
+        Args:
+            xt (torch.Tensor): (B, seq_len=M*N, d)
+            t (torch.Tensor): (B, seq_len)           -- per-position time
+            std (float): Standard deviation of the noise
+        Returns:
+            torch.Tensor: flow_logits of shape (B, seq_len, V)
         """
         token_embeddings = self.token_embed.weight
 
@@ -605,7 +615,7 @@ class TokenFlowModel(PreTrainedModel):
 
         cross = xt @ token_embeddings.t() # (B, seq_len, V)
         numer = xt_norm2 - 2 * t * cross + (t**2) * e_norm2  # (B, seq_len, V)
-        denom = 2 * (1 - t).pow(2) + eps ** 2 # (B, seq_len, 1)
+        denom = (2 * std ** 2) * (1 - t).pow(2) + eps ** 2 # (B, seq_len, 1)
         logits = -numer / denom # (B, seq_len, V)
 
         logZ = torch.logsumexp(logits, dim=-1, keepdim=True) # (B, seq_len, 1)
@@ -664,7 +674,7 @@ class TokenFlowModel(PreTrainedModel):
         freqs_cis = self._rope_cache(input_ids.device).repeat(2, 1)
         
         x1 = self.token_embed(input_ids)
-        x0 = torch.randn_like(x1)
+        x0 = torch.randn_like(x1) * self.embed_scale
         # t_sample = self._sample_time((batch_size, self.blk_num), input_ids.device)
         t_sample = torch.rand((batch_size, self.blk_num), device=input_ids.device)
         t_all = torch.cat([torch.ones_like(t_sample), t_sample], dim=1)
@@ -686,7 +696,7 @@ class TokenFlowModel(PreTrainedModel):
             model_logits = F.linear(h, self.token_embed.weight, None)
         else:
             model_logits = self.output_proj(h)
-        singular_logits = self._compute_singular_logits(xt, t_full)
+        singular_logits = self._compute_singular_logits(xt, t_full, std=self.embed_scale)
         logits = model_logits + singular_logits
         
         loss = F.cross_entropy(
@@ -736,7 +746,7 @@ class TokenFlowModel(PreTrainedModel):
         else:
             model_logits = self.output_proj(h)
         
-        singular_logits = self._compute_singular_logits(xt, t_full)
+        singular_logits = self._compute_singular_logits(xt, t_full, std=self.embed_scale)
         logits = model_logits + singular_logits
 
         return {"logits": logits}
@@ -774,7 +784,7 @@ class TokenFlowModel(PreTrainedModel):
 
         prev_pos = 0
         for cur_pos in range(0, total_len, self.blk_size):
-            x_all = torch.randn(batch_size, self.blk_size, self.dim, device=device)
+            x_all = torch.randn(batch_size, self.blk_size, self.dim, device=device) * self.embed_scale
             if cur_pos - prev_pos > 0:
                 x1 = self.token_embed(tokens[:, prev_pos:cur_pos])
                 x_all = torch.cat([x1, x_all], dim=1)
