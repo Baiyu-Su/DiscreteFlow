@@ -141,12 +141,12 @@ class Modulation(nn.Module):
         """
         Apply modulation to the input tensor.
         Args:
-            vec(torch.Tensor): (B, M, dim) — one vector per block.
+            vec(torch.Tensor): (B, 1, dim) — one vector per block.
         Returns:
-            ModulationOut: modulation parameters (shift, scale, gate) each of shape (B, M, dim)
+            ModulationOut: modulation parameters (shift, scale, gate) each of shape (B, 1, dim)
         """
-        out = self.w(F.silu(vec))  # (B, M, 3*dim)
-        shift, scale, gate = out.chunk(3, dim=-1)  # each (B, M, dim)
+        out = self.w(F.silu(vec))  # (B, 1, 3*dim)
+        shift, scale, gate = out.chunk(3, dim=-1)  # each (B, 1, dim)
         return ModulationOut(shift=shift, scale=scale, gate=gate)
 
 
@@ -344,12 +344,11 @@ class FeedForward(nn.Module):
 class NormalizedEmbedding(nn.Module):
     """Embedding layer whose vectors are normalized to a target RMS value.
 
-    The normalization is performed in-place within the forward pass, ensuring
-    that the stored weights are always normalized. This operation is done
-    without tracking gradients.
+    The normalization must be applied manually, for example, after each
+    optimizer step.
 
     Attributes:
-        raw_weight (nn.Parameter): The learnable parameter tensor.
+        weight (nn.Parameter): The learnable parameter tensor.
         scale (float): The target RMS value for the embedding vectors.
     """
 
@@ -387,11 +386,9 @@ class NormalizedEmbedding(nn.Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """
-        Performs a forward pass with in-place weight normalization.
+        Performs a forward pass using the stored weights.
+        This method does NOT perform weight normalization.
         """
-        with torch.no_grad():
-            self._normalize_weights()
-            
         return F.embedding(
             input,
             self.weight,
@@ -601,9 +598,10 @@ class TokenFlowModel(PreTrainedModel):
         
         x1 = self.token_embed(input_ids)
         x0 = torch.randn_like(x1) * self.embed_scale
-        t_sample = torch.rand((batch_size, 1, 1), device=input_ids.device)
+        t_sample = torch.rand((batch_size, 1), device=input_ids.device)
+        t_full = t_sample.repeat(1, seq_len).unsqueeze(-1)
         
-        h = rectified_flow_interpolate(x0, x1, t_sample)
+        h = rectified_flow_interpolate(x0, x1, t_full)
         t_vec = self.time_embed(timestep_embedding(t_sample, self.time_dim))
         xt = h
 
@@ -618,7 +616,7 @@ class TokenFlowModel(PreTrainedModel):
             model_logits = F.linear(h, self.token_embed.weight, None)
         else:
             model_logits = self.output_proj(h)
-        singular_logits = self._compute_singular_logits(xt, t_sample, std=self.embed_scale)
+        singular_logits = self._compute_singular_logits(xt, t_full, std=self.embed_scale)
         logits = model_logits + singular_logits
         
         loss = F.cross_entropy(

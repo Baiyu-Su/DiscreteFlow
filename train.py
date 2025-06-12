@@ -23,6 +23,21 @@ from model import TokenFlowModel, TokenFlowConfig, RMSNorm, NormalizedEmbedding
 from dataloader import DataCollatorPretrainFlow
 
 
+class NormalizationCallback(TrainerCallback):
+    """
+    Callback to re-normalize the weights of `NormalizedEmbedding` layers
+    at the end of each training step.
+    """
+    def on_step_end(self, args, state, control, model, **kwargs):
+        """
+        After the optimizer step, re-normalize the embedding weights.
+        """
+        for module in model.modules():
+            if isinstance(module, NormalizedEmbedding):
+                with torch.no_grad():
+                    module._normalize_weights()
+
+
 class StatsLoggingCallback(TrainerCallback):
     """
     Logs, every logging step:
@@ -60,7 +75,7 @@ class StatsLoggingCallback(TrainerCallback):
     # def on_train_batch_end(...):
 
     def on_step_end(self, args, state, control, **kwargs):
-        # Respect the Trainer’s should_log and only on rank 0
+        # Respect the Trainer's should_log and only on rank 0
         if not control.should_log or args.process_index != 0:
             return
 
@@ -156,7 +171,7 @@ def main():
         cache_file_name=DISK_VALID
     )
 
-    data_collator = DataCollatorPretrainFlow(tokenizer=tokenizer, ctx_len=cfg.blk_num*cfg.blk_size, blk_size=cfg.blk_size)
+    data_collator = DataCollatorPretrainFlow(tokenizer=tokenizer, ctx_len=cfg.ctx_len)
 
     model_config = TokenFlowConfig(
         ctx_len=cfg.ctx_len,
@@ -257,7 +272,7 @@ def main():
         eval_dataset=validation_data,
         data_collator=data_collator,
         compute_metrics=None,
-        callbacks=[StatsLoggingCallback(model)],
+        callbacks=[StatsLoggingCallback(model), NormalizationCallback()],
     )
 
     if training_args.process_index == 0:
