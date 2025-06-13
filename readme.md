@@ -100,7 +100,7 @@ python examine.py --ckpt_dir /u/chizhang/scratch/data/out_shakespeare_gumbel-cau
 python examine.py --ckpt_dir /u/chizhang/scratch/data/out_fineweb_tokenflow/checkpoint-5000 --batch_size 8
 
 # Sample from Gumbel models
-python examine.py --ckpt_dir /u/chizhang/scratch/data/out_fineweb_gumbel/checkpoint-5000 --batch_size 8
+python examine.py --ckpt_dir /u/chizhang/scratch/data/out_shakespeare_gumbel-untie-noncausal/checkpoint-1000 --batch_size 4
 
 # Sample from causal models (if trained with --causal flag)
 python examine.py --ckpt_dir /u/chizhang/scratch/data/out_fineweb_baseline_causal/checkpoint-5000 --batch_size 8

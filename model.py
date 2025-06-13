@@ -49,6 +49,7 @@ class TokenFlowConfig(PretrainedConfig):
         # Gumbel reflow parameters
         use_gumbel_flow: bool = False,
         teacher_model_name: Optional[str] = None,
+        freeze_token_embed: bool = False,  # Whether to freeze token embeddings after teacher initialization
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -72,6 +73,7 @@ class TokenFlowConfig(PretrainedConfig):
         self.use_gumbel_flow = use_gumbel_flow
         self.teacher_model_name = teacher_model_name
         self.use_causal = use_causal
+        self.freeze_token_embed = freeze_token_embed
 
 
 class RMSNorm(nn.Module):
@@ -518,7 +520,6 @@ class TokenFlowModel(PreTrainedModel):
         self.register_buffer("freqs_cis", freqs_cis, persistent=False)
         
         # Teacher model for Gumbel reflow
-        self.teacher_model = None
         if config.use_gumbel_flow:
             # Only load teacher model if teacher_model_name is provided
             # During inference, we may not need the teacher model
@@ -526,20 +527,54 @@ class TokenFlowModel(PreTrainedModel):
                 print(f"Loading teacher model: {config.teacher_model_name}")
                 from transformers import AutoModelForCausalLM
                 # load local or hub checkpoints
-                self.teacher_model = AutoModelForCausalLM.from_pretrained(
+                teacher_model = AutoModelForCausalLM.from_pretrained(
                     config.teacher_model_name,
                 )
-                self.teacher_model.requires_grad_(False)
-                self.teacher_model.eval()
+                teacher_model.requires_grad_(False)
+                teacher_model.eval()
+                
+                # Store teacher model in a way that won't be registered as a submodule
+                # Use object.__setattr__ to avoid PyTorch's module registration
+                object.__setattr__(self, '_teacher_model', teacher_model)
                 
                 # Count teacher model parameters
-                teacher_params = sum(p.numel() for p in self.teacher_model.parameters())
+                teacher_params = sum(p.numel() for p in teacher_model.parameters())
                 print(f"Teacher model loaded successfully! ({teacher_params:,} parameters)")
                 print("Teacher model set to eval mode with requires_grad=False")
+                
+                # Initialize token_embed from teacher model embeddings
+                print("Initializing token_embed from teacher model embeddings...")
+                teacher_embeddings = teacher_model.get_input_embeddings().weight
+                
+                # Copy teacher embeddings to token_embed
+                with torch.no_grad():
+                    self.token_embed.weight.data.copy_(teacher_embeddings)
+                    
+                print("Copied teacher embeddings (preserving original scale)")
+                print(f"token_embed.weight.requires_grad: {self.token_embed.weight.requires_grad}")
+                
+                # Optionally freeze token embeddings
+                if config.freeze_token_embed:
+                    self.token_embed.weight.requires_grad_(False)
+                    print("✓ Frozen token_embed weights (requires_grad=False)")
+                    print("Token embeddings will NOT be updated during training")
+                else:
+                    print("Token embeddings remain trainable (will be fine-tuned during training)")
             
             else:
                 print("Note: Gumbel flow enabled but no teacher model specified (inference mode)")
 
+    
+    @property
+    def teacher_model(self):
+        """Access teacher model without it being registered as a submodule."""
+        return getattr(self, '_teacher_model', None)
+    
+    def _ensure_teacher_device(self, device):
+        """Ensure teacher model is on the same device as the main model."""
+        if hasattr(self, '_teacher_model') and self._teacher_model is not None:
+            if next(self._teacher_model.parameters()).device != device:
+                self._teacher_model = self._teacher_model.to(device)
     
     def _rope_cache(self, device):
         if (not hasattr(self, "_freqs_cis") or self._freqs_cis.device != device):
@@ -590,15 +625,6 @@ class TokenFlowModel(PreTrainedModel):
         if not self.tied_word_embeddings:
             self.output_proj.reset_parameters()
     
-    def state_dict(self, *args, **kwargs):
-        """Override state_dict to exclude teacher model weights."""
-        state_dict = super().state_dict(*args, **kwargs)
-        # Remove teacher model weights from state dict to avoid saving them
-        keys_to_remove = [key for key in state_dict.keys() if key.startswith('teacher_model.')]
-        for key in keys_to_remove:
-            del state_dict[key]
-        return state_dict
-
     def forward(
         self, 
         input_ids: torch.LongTensor,
@@ -651,6 +677,9 @@ class TokenFlowModel(PreTrainedModel):
             # gumbel_type == "softmax_gumbel", x0 = softmax(gumbel), x1 = one-hot(input_ids)
             # gumbel_type == "gumbel_log_onehot", x0 = gumbel, x1 = log(one-hot(input_ids)) 
             assert self.teacher_model is not None, "Teacher model should be loaded when use_gumbel_flow=True"
+            
+            # Ensure teacher model is on the same device as input_ids
+            self._ensure_teacher_device(input_ids.device)
             
             with torch.no_grad():
                 teacher_output = self.teacher_model(input_ids)

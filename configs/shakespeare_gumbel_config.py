@@ -10,7 +10,7 @@ class MyConfig:
     dim = 512
     n_heads = 8
     n_layers = 8
-    tie_word_embeddings = False
+    tie_word_embeddings = True
     
     # Gumbel reflow parameters
     use_gumbel_flow = True
