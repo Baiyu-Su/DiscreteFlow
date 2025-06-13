@@ -234,7 +234,7 @@ def build_inference_block_mask(max_blk_num: int, blk_size: int, device=None):
         # Block indices for the query token and the key/value token
         q_blk = q_idx // blk_size
         kv_blk = kv_idx // blk_size
-        # Allow iff the query’s block is *not earlier* than the KV’s block
+        # Allow iff the query's block is *not earlier* than the KV's block
         return q_blk >= kv_blk
 
     total_tokens = max_blk_num * blk_size        # square mask (Q = KV)
@@ -316,3 +316,40 @@ def build_inference_time(time: float, seq_len: int, B: int, N: int) -> torch.Ten
 def row_rms(w: torch.Tensor, eps: float) -> torch.Tensor:
     """Compute per‑row RMS with numerical epsilon."""
     return w.pow(2).mean(dim=1, keepdim=True).add(eps).sqrt()
+
+
+def sample_posterior_gumbel(logits: torch.Tensor, token_idx: torch.Tensor) -> torch.Tensor:
+    """
+    Sample Gumbel noise vectors from the posterior distribution P(G | argmax(L+G) = token_idx).
+    
+    Args:
+        logits: Tensor of shape (B, T, V) - Teacher model logits
+        token_idx: Tensor of shape (B, T) - Ground truth tokens
+    
+    Returns:
+        Gumbel noise tensor of shape (B, T, V) satisfying the argmax constraint
+    """
+    # 1. Sample a full standard Gumbel vector
+    gumbel_full = -torch.log(-torch.log(torch.rand_like(logits) + 1e-20) + 1e-20)
+    
+    # 2. Find the maximum value among competitors (all tokens except the correct one)
+    # Mask out the correct token by setting its logit to a very negative value
+    masked_logits = logits.scatter(-1, token_idx.unsqueeze(-1), -1e9)
+    max_others = (masked_logits + gumbel_full).max(dim=-1, keepdim=True).values
+    
+    # 3. Compute truncation point for the winning Gumbel
+    # The winning token's Gumbel value must be > (max_others - logits_correct)
+    truncation_point = max_others - logits.gather(-1, token_idx.unsqueeze(-1))
+    
+    # 4. Sample from truncated Gumbel distribution using inverse transform sampling
+    # F(t) = exp(-exp(-t)) is the Gumbel CDF
+    F_t = torch.exp(-torch.exp(-truncation_point))
+    
+    # Sample uniform from [F(t), 1] then apply inverse CDF
+    U_t = F_t + torch.rand_like(F_t) * (1 - F_t)
+    gumbel_x_new = -torch.log(-torch.log(U_t + 1e-20) + 1e-20)
+    
+    # 5. Replace the winning token's Gumbel value
+    final_gumbel = gumbel_full.scatter(-1, token_idx.unsqueeze(-1), gumbel_x_new)
+    
+    return final_gumbel

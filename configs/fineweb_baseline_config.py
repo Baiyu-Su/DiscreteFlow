@@ -1,8 +1,8 @@
 class MyConfig:
-    ctx_len = 1024
+    ctx_len = 128
 
-    output_dir = "./out_small_causal"
-    run_name = "small_run_causal"
+    output_dir = "/u/chizhang/scratch/data/out_fineweb_tokenflow"
+    run_name = "fineweb_tokenflow_baseline"
     load_stats = True
 
     # Model config

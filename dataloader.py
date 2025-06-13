@@ -68,3 +68,53 @@ class DataCollatorPretrainFlow:
             "input_ids": input_ids,  # (num_chunks, ctx_len)
             "labels": labels,        # (num_chunks, ctx_len)
         }
+
+
+class DataCollatorShakespeare:
+    """
+    Collator for small datasets like Shakespeare that uses padding instead of chunking.
+    
+    This approach is better for small datasets where chunking might lose too much data.
+    Each sequence is padded/truncated to ctx_len, and padding tokens are ignored in loss.
+    """
+
+    def __init__(self, tokenizer, ctx_len: int):
+        self.pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+        self.eos_token_id = tokenizer.eos_token_id
+        self.bos_token_id = tokenizer.bos_token_id
+        self.ctx_len = ctx_len
+
+    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+        batch_input_ids = []
+        batch_labels = []
+        
+        for feat in features:
+            ids = feat["input_ids"]
+            if not isinstance(ids, torch.Tensor):
+                ids = torch.tensor(ids, dtype=torch.long)
+            
+            # Remove BOS if present
+            if ids.numel() > 0 and ids[0].item() == self.bos_token_id:
+                ids = ids[1:]
+            
+            # Truncate if too long
+            if ids.numel() > self.ctx_len:
+                ids = ids[:self.ctx_len]
+            
+            # Pad if too short
+            if ids.numel() < self.ctx_len:
+                padding_length = self.ctx_len - ids.numel()
+                padding = torch.full((padding_length,), self.pad_token_id, dtype=torch.long)
+                ids = torch.cat([ids, padding])
+            
+            # Create labels (same as input_ids, but pad tokens become -100)
+            labels = ids.clone()
+            labels[labels == self.pad_token_id] = -100
+            
+            batch_input_ids.append(ids)
+            batch_labels.append(labels)
+        
+        return {
+            "input_ids": torch.stack(batch_input_ids),  # (batch_size, ctx_len)
+            "labels": torch.stack(batch_labels),        # (batch_size, ctx_len)
+        }

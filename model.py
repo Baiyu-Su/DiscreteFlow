@@ -19,6 +19,7 @@ from model_utils import (
     apply_rotary_emb,
     timestep_embedding,
     rectified_flow_interpolate,
+    sample_posterior_gumbel,
 )
 
 
@@ -43,6 +44,11 @@ class TokenFlowConfig(PretrainedConfig):
         multiple_of: int = 64,
         norm_eps: float = 1e-6,
         load_stats: bool = True,
+        # Attention parameters
+        use_causal: bool = False,
+        # Gumbel reflow parameters
+        use_gumbel_flow: bool = False,
+        teacher_model_name: Optional[str] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -63,6 +69,9 @@ class TokenFlowConfig(PretrainedConfig):
         self.multiple_of = multiple_of
         self.norm_eps = norm_eps
         self.load_stats = load_stats
+        self.use_gumbel_flow = use_gumbel_flow
+        self.teacher_model_name = teacher_model_name
+        self.use_causal = use_causal
 
 
 class RMSNorm(nn.Module):
@@ -213,6 +222,7 @@ class Attention(nn.Module):
         self.head_dim = config.dim // config.n_heads
         self.max_batch = config.max_batch
         self.init_cutoff_factor = config.init_cutoff_factor
+        self.use_causal = config.use_causal
 
         self.wq = nn.Linear(config.dim, self.n_heads * self.head_dim, bias=False)
         self.wk = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False)
@@ -260,7 +270,7 @@ class Attention(nn.Module):
             
             out = F.scaled_dot_product_attention(
                 q, k, v,
-                is_causal=True,
+                is_causal=self.use_causal,
                 scale=1.0 / math.sqrt(self.head_dim)
             )
             # Transpose back to (B, L, H, D_h)
@@ -288,7 +298,7 @@ class Attention(nn.Module):
 
             out = F.scaled_dot_product_attention(
                 q, k_full, v_full,
-                is_causal=True,
+                is_causal=self.use_causal,
                 scale=1.0 / math.sqrt(self.head_dim)
             )
             # Transpose back to (B, L, H, D_h)
@@ -505,6 +515,20 @@ class TokenFlowModel(PreTrainedModel):
         freqs_cis = precompute_freqs_cis(
             self.dim//self.n_heads, self.ctx_len, config.rope_scaling)
         self.register_buffer("freqs_cis", freqs_cis, persistent=False)
+        
+        # Teacher model for Gumbel reflow
+        self.teacher_model = None
+        if config.use_gumbel_flow:
+            if not config.teacher_model_name:
+                raise ValueError("`teacher_model_name` must be specified when `use_gumbel_flow` is True.")
+            
+            from transformers import AutoModelForCausalLM
+            # load local or hub checkpoints
+            self.teacher_model = AutoModelForCausalLM.from_pretrained(
+                config.teacher_model_name,
+            )
+            self.teacher_model.requires_grad_(False)
+            self.teacher_model.eval()
     
     def _rope_cache(self, device):
         if (not hasattr(self, "_freqs_cis") or self._freqs_cis.device != device):
@@ -597,7 +621,29 @@ class TokenFlowModel(PreTrainedModel):
         freqs_cis = self._rope_cache(input_ids.device)
         
         x1 = self.token_embed(input_ids)
-        x0 = torch.randn_like(x1) * self.embed_scale
+        
+        # Posterior Gumbel reflow path
+        if self.config.use_gumbel_flow:
+            # Could try different x0 and x1 here, 
+            # Using x0 = softmax(gumbel) @ embed_weight and x1 = embed(input_ids) for now
+            # Alternatives: (need input projection)
+            # x0 = softmax(gumbel), x1 = one-hot(input_ids)
+            # x0 = gumbel, x1 = log(one-hot(input_ids)) 
+            assert self.teacher_model is not None
+            
+            with torch.no_grad():
+                teacher_output = self.teacher_model(input_ids)
+                logits = teacher_output.logits.to(torch.float32)
+
+            gumbel_noise = sample_posterior_gumbel(logits, input_ids)  # (B, T, V)
+            gumbel_probs = F.softmax(gumbel_noise, dim=-1)  # (B, T, V)
+            # Use einsum for efficient matrix multiplication: (B, T, V) @ (V, D) -> (B, T, D)
+            x0 = torch.einsum('btv,vd->btd', gumbel_probs, self.token_embed.weight)
+        
+        # Original path
+        else:
+            x0 = torch.randn_like(x1) * self.embed_scale
+            
         t_sample = torch.rand((batch_size, 1), device=input_ids.device)
         t_full = t_sample.repeat(1, seq_len).unsqueeze(-1)
         
@@ -696,7 +742,15 @@ class TokenFlowModel(PreTrainedModel):
         total_len = self.ctx_len
         device = self.token_embed.weight.device
 
-        x_t = torch.randn(batch_size, total_len, self.dim, device=device) * self.embed_scale
+        # Initialize x_t based on whether we're using Gumbel reflow or not
+        if self.config.use_gumbel_flow:
+            # Gumbel reflow path
+            gumbel_noise = -torch.log(-torch.log(torch.rand(batch_size, total_len, self.config.vocab_size, device=device) + 1e-20) + 1e-20)
+            gumbel_probs = F.softmax(gumbel_noise, dim=-1)
+            x_t = torch.einsum('btv,vd->btd', gumbel_probs, self.token_embed.weight)
+        else:
+            # Original random noise path
+            x_t = torch.randn(batch_size, total_len, self.dim, device=device) * self.embed_scale
 
         for i, (time, next_time) in enumerate(zip(time_schedule[:-1], time_schedule[1:])):
             logits = self.inference_forward(x_t, start_pos=0, time=time).logits

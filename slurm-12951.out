@@ -1,0 +1,305 @@
+You are using the default legacy behaviour of the <class 'transformers.models.llama.tokenization_llama.LlamaTokenizer'>. This is expected, and simply means that the `legacy` (previous) behavior will be used so nothing changes for you. If you want to use the new behaviour, set `legacy=False`. This should only be set if you understand what it means, and thoroughly read the reason why this was added as explained in https://github.com/huggingface/transformers/pull/24565 - if you loaded a llama tokenizer from a GGUF file you can ignore this message
+Teacher model - Shakespeare dataset processing:
+  Full text length: 1,003,854 characters
+  Chunk size: 256, Overlap: 255
+  Total chunks created: 1003600
+  Training chunks: 903240
+  Validation chunks: 100360
+Teacher model - Final dataset sizes:
+  Training examples: 903240
+  Validation examples: 100360
+--- Teacher Example 0 ---
+Input IDs  : [1, 322, 17240, 15509, 13, 3047, 16286, 322, 946, 6742, 8866, 29991, 341, 355, 322, 8323, 3271, 29892, 13, 2816, 29892, 491, 278, 24237, 310, 18356, 29892, 306, 29915, 645, 5967, 278, 1701, 29872, 13, 2855, 1207, 590, 29129, 373, 366, 29901, 1106, 304, 29915, 29873, 29901, 2041, 373, 29936] ...
+
+ Decoded in : <s> and faces pale
+With flight and agued fear! Mend and charge home,
+Or, by the fires of heaven, I'll leave the foe
+And make my wars on you: look to't: come on;
+If you'll stand fast, we'll beat them t ...
+
+ Decoded lbl: <s>and faces pale
+With flight and agued fear! Mend and charge home,
+Or, by the fires of heaven, I'll leave the foe
+And make my wars on you: look to't: come on;
+If you'll stand fast, we'll beat them to ...
+
+--- Teacher Example 1 ---
+Input IDs  : [1, 540, 29915, 645, 451, 367, 7124, 13, 3047, 6536, 333, 29915, 29879, 16578, 29936, 1183, 23870, 360, 713, 29915, 29879, 12309, 29936, 13, 2855, 29892, 297, 4549, 5296, 310, 521, 579, 537, 1532, 5075, 29915, 29881, 29892, 13, 4591, 5360, 29915, 29879, 8062, 2278, 728, 12580, 1183, 12080, 443] ...
+
+ Decoded in : <s> he'll not be hit
+With Cupid's arrow; she hath Dian's wit;
+And, in strong proof of chastity well arm'd,
+From love's weak childish bow she lives unharm'd.
+She will not stay the siege of loving terms ...
+
+ Decoded lbl: <s>he'll not be hit
+With Cupid's arrow; she hath Dian's wit;
+And, in strong proof of chastity well arm'd,
+From love's weak childish bow she lives unharm'd.
+She will not stay the siege of loving terms, ...
+
+--- Teacher Example 2 ---
+Input IDs  : [1, 360, 29901, 13, 3421, 18120, 3279, 2801, 4225, 674, 505, 372, 577, 29889, 13, 13, 29979, 1955, 29968, 29901, 13, 29902, 4091, 451, 8709, 297, 11813, 472, 278, 23615, 29889, 13, 13, 29954, 3927, 29965, 4741, 1254, 1001, 29901, 13, 11008, 29892, 825, 881, 366, 8866, 29973, 13, 13] ...
+
+ Decoded in : <s>D:
+My lord protector needs will have it so.
+
+YORK:
+I shall not sleep in quiet at the Tower.
+
+GLOUCESTER:
+Why, what should you fear?
+
+YORK:
+Marry, my uncle Clarence' angry ghost:
+My grandam told me  ...
+
+ Decoded lbl: <s>D:
+My lord protector needs will have it so.
+
+YORK:
+I shall not sleep in quiet at the Tower.
+
+GLOUCESTER:
+Why, what should you fear?
+
+YORK:
+Marry, my uncle Clarence' angry ghost:
+My grandam told me  ...
+
+--- Teacher Example 3 ---
+Input IDs  : [1, 953, 415, 13, 2713, 497, 367, 445, 11220, 1034, 27358, 373, 278, 8437, 29915, 29879, 11220, 3700, 29936, 13, 6246, 565, 306, 266, 4401, 29892, 278, 11581, 310, 590, 4218, 13, 1576, 3203, 310, 366, 4091, 6232, 670, 760, 727, 974, 29889, 13, 29456, 28987, 322, 534, 3427, 1691] ...
+
+ Decoded in : <s> empt
+Shall be this cold corpse on the earth's cold face;
+But if I thrive, the gain of my attempt
+The least of you shall share his part thereof.
+Sound drums and trumpets boldly and cheerfully;
+God  ...
+
+ Decoded lbl: <s>empt
+Shall be this cold corpse on the earth's cold face;
+But if I thrive, the gain of my attempt
+The least of you shall share his part thereof.
+Sound drums and trumpets boldly and cheerfully;
+God a ...
+
+wandb: Currently logged in as: chizhang-cs (chizhang-cs-the-university-of-texas-at-austin) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: Tracking run with wandb version 0.19.11
+wandb: Run data is saved locally in /u/chizhang/Projects/DiscreteFlow/wandb/run-20250612_202049-3yhb25yb
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run shakespeare_llama_teacher
+wandb: ⭐️ View project at https://wandb.ai/chizhang-cs-the-university-of-texas-at-austin/TokenFlow-Teacher
+wandb: 🚀 View run at https://wandb.ai/chizhang-cs-the-university-of-texas-at-austin/TokenFlow-Teacher/runs/3yhb25yb
+2025-06-12 20:20:50.709 | INFO     | __main__:main:239 - Teacher Model Configuration:
+{'_attn_implementation_autoset': True,
+ '_name_or_path': '',
+ 'add_cross_attention': False,
+ 'architectures': None,
+ 'attention_bias': False,
+ 'attention_dropout': 0.0,
+ 'bad_words_ids': None,
+ 'begin_suppress_tokens': None,
+ 'bos_token_id': 1,
+ 'chunk_size_feed_forward': 0,
+ 'cross_attention_hidden_size': None,
+ 'decoder_start_token_id': None,
+ 'diversity_penalty': 0.0,
+ 'do_sample': False,
+ 'early_stopping': False,
+ 'encoder_no_repeat_ngram_size': 0,
+ 'eos_token_id': 2,
+ 'exponential_decay_length_penalty': None,
+ 'finetuning_task': None,
+ 'forced_bos_token_id': None,
+ 'forced_eos_token_id': None,
+ 'head_dim': 64,
+ 'hidden_act': 'silu',
+ 'hidden_size': 512,
+ 'id2label': {0: 'LABEL_0', 1: 'LABEL_1'},
+ 'initializer_range': 0.02,
+ 'intermediate_size': 2048,
+ 'is_decoder': False,
+ 'is_encoder_decoder': False,
+ 'label2id': {'LABEL_0': 0, 'LABEL_1': 1},
+ 'length_penalty': 1.0,
+ 'max_length': 20,
+ 'max_position_embeddings': 256,
+ 'min_length': 0,
+ 'mlp_bias': False,
+ 'model_type': 'llama',
+ 'no_repeat_ngram_size': 0,
+ 'num_attention_heads': 8,
+ 'num_beam_groups': 1,
+ 'num_beams': 1,
+ 'num_hidden_layers': 8,
+ 'num_key_value_heads': 8,
+ 'num_return_sequences': 1,
+ 'output_attentions': False,
+ 'output_hidden_states': False,
+ 'output_scores': False,
+ 'pad_token_id': 2,
+ 'prefix': None,
+ 'pretraining_tp': 1,
+ 'problem_type': None,
+ 'pruned_heads': {},
+ 'remove_invalid_values': False,
+ 'repetition_penalty': 1.0,
+ 'return_dict': True,
+ 'return_dict_in_generate': False,
+ 'rms_norm_eps': 1e-06,
+ 'rope_scaling': None,
+ 'rope_theta': 10000.0,
+ 'sep_token_id': None,
+ 'suppress_tokens': None,
+ 'task_specific_params': None,
+ 'temperature': 1.0,
+ 'tf_legacy_loss': False,
+ 'tie_encoder_decoder': False,
+ 'tie_word_embeddings': True,
+ 'tokenizer_class': None,
+ 'top_k': 50,
+ 'top_p': 1.0,
+ 'torch_dtype': None,
+ 'torchscript': False,
+ 'transformers_version': '4.51.1',
+ 'typical_p': 1.0,
+ 'use_bfloat16': False,
+ 'use_cache': True,
+ 'vocab_size': 32000}
+2025-06-12 20:20:50.710 | INFO     | __main__:main:245 - HuggingFace Training Arguments:
+TrainingArguments(
+_n_gpu=1,
+accelerator_config={'split_batches': False, 'dispatch_batches': None, 'even_batches': True, 'use_seedable_sampler': True, 'non_blocking': False, 'gradient_accumulation_kwargs': None, 'use_configured_state': False},
+adafactor=False,
+adam_beta1=0.9,
+adam_beta2=0.98,
+adam_epsilon=1e-08,
+auto_find_batch_size=False,
+average_tokens_across_devices=False,
+batch_eval_metrics=False,
+bf16=True,
+bf16_full_eval=False,
+data_seed=None,
+dataloader_drop_last=False,
+dataloader_num_workers=4,
+dataloader_persistent_workers=False,
+dataloader_pin_memory=False,
+dataloader_prefetch_factor=None,
+ddp_backend=None,
+ddp_broadcast_buffers=None,
+ddp_bucket_cap_mb=None,
+ddp_find_unused_parameters=False,
+ddp_timeout=1800,
+debug=[],
+deepspeed=None,
+disable_tqdm=False,
+do_eval=True,
+do_predict=False,
+do_train=True,
+eval_accumulation_steps=1,
+eval_delay=0,
+eval_do_concat_batches=True,
+eval_on_start=False,
+eval_steps=100,
+eval_strategy=IntervalStrategy.STEPS,
+eval_use_gather_object=False,
+fp16=False,
+fp16_backend=auto,
+fp16_full_eval=False,
+fp16_opt_level=O1,
+fsdp=[],
+fsdp_config={'min_num_params': 0, 'xla': False, 'xla_fsdp_v2': False, 'xla_fsdp_grad_ckpt': False},
+fsdp_min_num_params=0,
+fsdp_transformer_layer_cls_to_wrap=None,
+full_determinism=False,
+gradient_accumulation_steps=1,
+gradient_checkpointing=False,
+gradient_checkpointing_kwargs=None,
+greater_is_better=None,
+group_by_length=False,
+half_precision_backend=auto,
+hub_always_push=False,
+hub_model_id=None,
+hub_private_repo=None,
+hub_strategy=HubStrategy.EVERY_SAVE,
+hub_token=<HUB_TOKEN>,
+ignore_data_skip=False,
+include_for_metrics=[],
+include_inputs_for_metrics=False,
+include_num_input_tokens_seen=False,
+include_tokens_per_second=False,
+jit_mode_eval=False,
+label_names=None,
+label_smoothing_factor=0.0,
+learning_rate=0.0004,
+length_column_name=length,
+load_best_model_at_end=False,
+local_rank=0,
+log_level=passive,
+log_level_replica=warning,
+log_on_each_node=True,
+logging_dir=/u/chizhang/scratch/data/out_shakespeare_teacher/runs/Jun12_20-20-48_dgx-4,
+logging_first_step=False,
+logging_nan_inf_filter=True,
+logging_steps=50,
+logging_strategy=IntervalStrategy.STEPS,
+lr_scheduler_kwargs={},
+lr_scheduler_type=SchedulerType.COSINE,
+max_grad_norm=1.0,
+max_steps=5000,
+metric_for_best_model=None,
+mp_parameters=,
+neftune_noise_alpha=None,
+no_cuda=False,
+num_train_epochs=3.0,
+optim=OptimizerNames.ADAMW_TORCH,
+optim_args=None,
+optim_target_modules=None,
+output_dir=/u/chizhang/scratch/data/out_shakespeare_teacher,
+overwrite_output_dir=True,
+past_index=-1,
+per_device_eval_batch_size=128,
+per_device_train_batch_size=128,
+prediction_loss_only=False,
+push_to_hub=False,
+push_to_hub_model_id=None,
+push_to_hub_organization=None,
+push_to_hub_token=<PUSH_TO_HUB_TOKEN>,
+ray_scope=last,
+remove_unused_columns=False,
+report_to=['wandb'],
+restore_callback_states_from_checkpoint=False,
+resume_from_checkpoint=None,
+run_name=/u/chizhang/scratch/data/out_shakespeare_teacher,
+save_on_each_node=False,
+save_only_model=False,
+save_safetensors=True,
+save_steps=1000,
+save_strategy=SaveStrategy.STEPS,
+save_total_limit=3,
+seed=42,
+skip_memory_metrics=True,
+tf32=None,
+torch_compile=False,
+torch_compile_backend=None,
+torch_compile_mode=None,
+torch_empty_cache_steps=None,
+torchdynamo=None,
+tp_size=0,
+tpu_metrics_debug=False,
+tpu_num_cores=None,
+use_cpu=False,
+use_ipex=False,
+use_legacy_prediction_loop=False,
+use_liger_kernel=False,
+use_mps_device=False,
+warmup_ratio=0.0,
+warmup_steps=500,
+weight_decay=0.02,
+)
+2025-06-12 20:20:50.710 | INFO     | __main__:main:246 - Total teacher model parameters: 49947136
+2025-06-12 20:20:50.710 | INFO     | __main__:main:247 - Non-embedding parameters: 33563136
+2025-06-12 20:20:50.785 | INFO     | __main__:main:259 - Let the teacher training begin.
+wandb: WARNING The `run_name` is currently set to the same value as `TrainingArguments.output_dir`. If this was not intended, please specify a different run name by setting the `TrainingArguments.run_name` parameter.
+  0%|          | 0/5000 [00:00<?, ?it/s]  0%|          | 1/5000 [00:01<2:37:33,  1.89s/it]  0%|          | 2/5000 [00:02<1:33:24,  1.12s/it]  0%|          | 3/5000 [00:03<1:10:55,  1.17it/s]  0%|          | 4/5000 [00:03<1:01:24,  1.36it/s]  0%|          | 5/5000 [00:04<56:09,  1.48it/s]    0%|          | 6/5000 [00:04<54:20,  1.53it/s]  0%|          | 7/5000 [00:05<51:49,  1.61it/s]  0%|          | 8/5000 [00:05<50:03,  1.66it/s]  0%|          | 9/5000 [00:06<49:32,  1.68it/s]  0%|          | 10/5000 [00:06<48:03,  1.73it/s]  0%|          | 11/5000 [00:07<46:58,  1.77it/s]  0%|          | 12/5000 [00:08<47:27,  1.75it/s]  0%|          | 13/5000 [00:08<47:52,  1.74it/s]  0%|          | 14/5000 [00:09<47:02,  1.77it/s]  0%|          | 15/5000 [00:09<47:23,  1.75it/s]  0%|          | 16/5000 [00:10<48:39,  1.71it/s]  0%|          | 17/5000 [00:11<48:20,  1.72it/s]  0%|          | 18/5000 [00:11<47:52,  1.73it/s]  0%|          | 19/5000 [00:12<47:59,  1.73it/s]  0%|          | 20/5000 [00:12<46:40,  1.78it/s]  0%|          | 21/5000 [00:13<47:04,  1.76it/s]  0%|          | 22/5000 [00:13<47:14,  1.76it/s]  0%|          | 23/5000 [00:14<48:00,  1.73it/s]
