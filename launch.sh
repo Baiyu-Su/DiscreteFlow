@@ -12,4 +12,4 @@
 #SBATCH --output=/u/chizhang/Projects/DiscreteFlow/logs/%x-%j.out
 #SBATCH --error=/u/chizhang/Projects/DiscreteFlow/logs/%x-%j.err
 
-bash fineweb_run.sh
+bash shakespeare_run.sh

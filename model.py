@@ -625,11 +625,12 @@ class TokenFlowModel(PreTrainedModel):
         
         # Posterior Gumbel reflow path
         if self.config.use_gumbel_flow:
+            # gumbel_type == "expected_embeddings" (current)
             # Could try different x0 and x1 here, 
             # Using x0 = softmax(gumbel) @ embed_weight and x1 = embed(input_ids) for now
-            # Alternatives: (need input projection)
-            # x0 = softmax(gumbel), x1 = one-hot(input_ids)
-            # x0 = gumbel, x1 = log(one-hot(input_ids)) 
+            # Alternatives: (need input projection, and changes in the generate function)
+            # gumbel_type == "softmax_gumbel", x0 = softmax(gumbel), x1 = one-hot(input_ids)
+            # gumbel_type == "gumbel_log_onehot", x0 = gumbel, x1 = log(one-hot(input_ids)) 
             assert self.teacher_model is not None
             
             with torch.no_grad():

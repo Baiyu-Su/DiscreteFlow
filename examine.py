@@ -141,6 +141,7 @@ def main() -> None:
     model.eval()
     
     # Use max_length if provided, otherwise use model's context length
+    # For gumbel, we could try smaller steps to compare the quality, as the trajectory should be straighter
     max_length = args.max_length if args.max_length is not None else model_config.ctx_len
     time_schedule = np.linspace(0, 1., max_length)
 

@@ -72,30 +72,6 @@ python train.py --config configs/fineweb_gumbel_config.py --dataset fineweb --ca
 
 **Note:** Using `gpt2` (~124M params) as the pretrained teacher model with matching GPT-2 tokenizer. 
 
-## Configuration Files (FineWeb)
-
-### fineweb_baseline_config.py
-- Original TokenFlow baseline for large-scale training
-- 1024 context length, 12 layers, 12 heads
-- 30,000 training steps
-
-### fineweb_gumbel_config.py
-- TokenFlow with Gumbel reflow enabled
-- Uses pretrained GPT-2 as teacher (no training required)
-- 1024 context length, 12 layers, 12 heads
-- 30,000 training steps
-
-## Training Order & Dependencies
-
-### Shakespeare Experiments
-1. **Steps 1.1 & 1.2** (TokenFlow baseline) can run in parallel
-2. **Step 2.1** (Teacher training) can run in parallel with 1.1 & 1.2
-3. **Steps 2.2** (Gumbel causal/non-causal) can run after 2.1 completes
-
-### FineWeb Experiments  
-1. **Steps 3.1** (TokenFlow baseline) can run independently
-2. **Steps 3.2** (Gumbel causal/non-causal) can run immediately (uses pretrained teacher)
-
 
 **Note:** Teacher model training is only needed for Shakespeare (uses LLaMA tokenizer), for FineWeb we use pretrained GPT-2 with matching GPT-2 tokenizer.
 
