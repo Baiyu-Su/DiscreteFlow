@@ -6,5 +6,5 @@
 
 # python train.py --config configs/shakespeare_gumbel_config.py --dataset shakespeare --causal --output_dir /u/chizhang/scratch/data/out_shakespeare_gumbel-tie-causal
 
-# python train.py --config configs/shakespeare_gumbel_config.py --dataset shakespeare --output_dir /u/chizhang/scratch/data/out_shakespeare_gumbel-tie-noncausal
+python train.py --config configs/shakespeare_gumbel_config.py --dataset shakespeare --output_dir /u/chizhang/scratch/data/out_shakespeare_gumbel-tie-noncausal
 

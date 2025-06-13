@@ -50,6 +50,7 @@ class TokenFlowConfig(PretrainedConfig):
         use_gumbel_flow: bool = False,
         teacher_model_name: Optional[str] = None,
         freeze_token_embed: bool = False,  # Whether to freeze token embeddings after teacher initialization
+        init_from_teacher: bool = False,    # Whether to initialize token embeddings from the teacher model
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -74,6 +75,7 @@ class TokenFlowConfig(PretrainedConfig):
         self.teacher_model_name = teacher_model_name
         self.use_causal = use_causal
         self.freeze_token_embed = freeze_token_embed
+        self.init_from_teacher = init_from_teacher
 
 
 class RMSNorm(nn.Module):
@@ -541,25 +543,28 @@ class TokenFlowModel(PreTrainedModel):
                 teacher_params = sum(p.numel() for p in teacher_model.parameters())
                 print(f"Teacher model loaded successfully! ({teacher_params:,} parameters)")
                 print("Teacher model set to eval mode with requires_grad=False")
-                
-                # Initialize token_embed from teacher model embeddings
-                print("Initializing token_embed from teacher model embeddings...")
-                teacher_embeddings = teacher_model.get_input_embeddings().weight
-                
-                # Copy teacher embeddings to token_embed
-                with torch.no_grad():
-                    self.token_embed.weight.data.copy_(teacher_embeddings)
+
+                if config.init_from_teacher:
+                    # Initialize token_embed from teacher model embeddings
+                    print("Initializing token_embed from teacher model embeddings...")
+                    teacher_embeddings = teacher_model.get_input_embeddings().weight
                     
-                print("Copied teacher embeddings (preserving original scale)")
-                print(f"token_embed.weight.requires_grad: {self.token_embed.weight.requires_grad}")
-                
-                # Optionally freeze token embeddings
-                if config.freeze_token_embed:
-                    self.token_embed.weight.requires_grad_(False)
-                    print("✓ Frozen token_embed weights (requires_grad=False)")
-                    print("Token embeddings will NOT be updated during training")
+                    # Copy teacher embeddings to token_embed
+                    with torch.no_grad():
+                        self.token_embed.weight.data.copy_(teacher_embeddings)
+                        
+                    print("Copied teacher embeddings (preserving original scale)")
+                    print(f"token_embed.weight.requires_grad: {self.token_embed.weight.requires_grad}")
+                    
+                    # Optionally freeze token embeddings
+                    if config.freeze_token_embed:
+                        self.token_embed.weight.requires_grad_(False)
+                        print("Frozen token_embed weights (requires_grad=False)")
+                        print("Token embeddings will NOT be updated during training")
+                    else:
+                        print("Token embeddings remain trainable (will be fine-tuned during training)")
                 else:
-                    print("Token embeddings remain trainable (will be fine-tuned during training)")
+                    print("Skipping teacher embedding initialization (using random initialization).")
             
             else:
                 print("Note: Gumbel flow enabled but no teacher model specified (inference mode)")

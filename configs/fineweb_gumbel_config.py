@@ -10,7 +10,7 @@ class MyConfig:
     dim = 768
     n_heads = 12  # Head dim must be divisible by 128
     n_layers = 16
-    tie_word_embeddings = False  # Prevent cheating in Gumbel flow training
+    tie_word_embeddings = True  
     
     # Gumbel reflow parameters
     use_gumbel_flow = True
