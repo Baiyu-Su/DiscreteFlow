@@ -1,24 +1,25 @@
 class MyConfig:
     ctx_len = 1024
 
-    output_dir = "./out_small_causal"
-    run_name = "small_run_causal"
+    output_dir = "./out_small_causal_encoder"
+    run_name = "small_run_causal_encoder"
     load_stats = True
 
     # Model config
     vocab_size = 32000
+    embed_dim = 64
     dim = 768
     n_heads = 12 # Head dim must be divisible by 128
     n_layers = 12
     tie_word_embeddings = True
     
     per_device_train_batch_size = 40
-    gradient_accumulation_steps = 10
+    gradient_accumulation_steps = 16
     
     dataloader_num_workers = 8
-    max_steps = 30000
-    eval_steps = 500
-    save_steps = 1000
+    max_steps = 20000
+    eval_steps = 2000
+    save_steps = 2000
     logging_steps = 10
 
     # Optimization

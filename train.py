@@ -204,7 +204,7 @@ def main():
         per_device_train_batch_size=cfg.per_device_train_batch_size,
         gradient_accumulation_steps=cfg.gradient_accumulation_steps,
         per_device_eval_batch_size=cfg.per_device_train_batch_size,
-        eval_accumulation_steps=cfg.gradient_accumulation_steps,
+        # eval_accumulation_steps=cfg.gradient_accumulation_steps,
         logging_steps=cfg.logging_steps,
         max_steps=cfg.max_steps,
         remove_unused_columns=False,

@@ -30,6 +30,7 @@ class TokenFlowConfig(PretrainedConfig):
         ctx_len: int = 1024,
         max_batch: int = 64,
         vocab_size: int = 32000,
+        embed_dim: int = 128,
         dim: int = 1024,
         hidden_dim: int | None = None,
         time_dim: int = 256,
@@ -51,13 +52,14 @@ class TokenFlowConfig(PretrainedConfig):
         self.max_batch = max_batch
         self.vocab_size = vocab_size
         self.dim = dim
+        self.embed_dim = embed_dim
         self.hidden_dim = hidden_dim or 4 * dim
         self.time_dim = time_dim
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads or n_heads
         self.n_layers = n_layers
         self.init_cutoff_factor = init_cutoff_factor
-        self.embed_scale = embed_scale or 1.0 / math.sqrt(dim)
+        self.embed_scale = embed_scale or 1.0 / math.sqrt(embed_dim)
         self.tie_word_embeddings = tie_word_embeddings
         self.rope_scaling = rope_scaling
         self.multiple_of = multiple_of
@@ -209,6 +211,7 @@ class Attention(nn.Module):
         self.layer_id = layer_id
         self.n_kv_heads = config.n_heads if config.n_kv_heads is None else config.n_kv_heads
         self.n_heads = config.n_heads
+        self.ctx_len = config.ctx_len
         self.dim = config.dim
         self.head_dim = config.dim // config.n_heads
         self.max_batch = config.max_batch
@@ -266,12 +269,10 @@ class Attention(nn.Module):
             # Transpose back to (B, L, H, D_h)
             out = out.transpose(1, 2)
         else:
-            # Inference path with KV caching
             end_pos = start_pos + seq_len
             
             if self.cache_k.numel() == 0 or self.cache_k.size(1) < end_pos:
-                max_len = self.ctx_len
-                shape   = (self.max_batch, max_len, self.n_kv_heads, self.head_dim)
+                shape   = (self.max_batch, self.ctx_len, self.n_kv_heads, self.head_dim)
                 self.cache_k = torch.zeros(shape, device=x.device, dtype=k.dtype)
                 self.cache_v = torch.zeros_like(self.cache_k)
                 
@@ -341,6 +342,69 @@ class FeedForward(nn.Module):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
     
 
+class Encoder(nn.Module):
+    def __init__(self, config: TokenFlowConfig):
+        super().__init__()
+        self.embed_dim = config.embed_dim
+        self.dim = config.dim
+        self.multiple_of = config.multiple_of
+        self.init_cutoff_factor = config.init_cutoff_factor
+
+        hidden_dim = self.multiple_of * ((config.hidden_dim + self.multiple_of - 1) // self.multiple_of)
+
+        self.w1 = nn.Linear(self.embed_dim, hidden_dim, bias=False)
+        self.w2 = nn.Linear(hidden_dim, self.dim, bias=False)
+        self.w3 = nn.Linear(self.embed_dim, hidden_dim, bias=False)
+
+        self.norm = RMSNorm(self.embed_dim, eps=config.norm_eps)
+        self.projection = (
+            nn.Linear(self.embed_dim, self.dim, bias=False)
+            if self.embed_dim != self.dim
+            else nn.Identity()
+        )
+
+    def reset_parameters(self):
+        std_in = 1 / math.sqrt(self.embed_dim)
+        init_normal(self.w1, std_in, self.init_cutoff_factor)
+        init_normal(self.w2, 1 / math.sqrt(self.w1.out_features), self.init_cutoff_factor)
+        init_normal(self.w3, std_in, self.init_cutoff_factor)
+        if isinstance(self.projection, nn.Linear):
+            init_normal(self.projection, std_in, self.init_cutoff_factor)
+        self.norm.reset_parameters()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.norm(x)
+        ffn_out = self.w2(F.silu(self.w1(h)) * self.w3(h))
+        return self.projection(x) + ffn_out
+
+
+class Decoder(nn.Module):
+    def __init__(self, config: TokenFlowConfig):
+        super().__init__()
+        self.dim = config.dim
+        self.embed_dim = config.embed_dim
+        self.init_cutoff_factor = config.init_cutoff_factor
+
+        self.norm = RMSNorm(self.dim, eps=config.norm_eps)
+        self.proj = nn.Linear(self.dim, self.embed_dim, bias=False)
+        self.projection = (
+            nn.Linear(self.dim, self.embed_dim, bias=False) 
+            if self.dim != self.embed_dim 
+            else nn.Identity()
+        )
+
+    def reset_parameters(self):
+        std = 1 / math.sqrt(self.dim)
+        init_normal(self.proj, std, self.init_cutoff_factor)
+        if isinstance(self.projection, nn.Linear):
+            init_normal(self.projection, std, self.init_cutoff_factor)
+        self.norm.reset_parameters()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.norm(x)
+        return self.projection(x) + F.silu(self.proj(h))
+
+
 class NormalizedEmbedding(nn.Module):
     """Embedding layer whose vectors are normalized to a target RMS value.
 
@@ -359,14 +423,14 @@ class NormalizedEmbedding(nn.Module):
             raise ValueError("The `embed_scale` must be a positive float.")
             
         self.vocab_size = config.vocab_size
-        self.dim = config.dim
+        self.embed_dim = config.embed_dim
         self.embed_scale = config.embed_scale
         self.padding_idx = None
         self.scale_grad_by_freq = False
         self.sparse = False
         self.eps = config.norm_eps
 
-        self.weight = nn.Parameter(torch.empty(self.vocab_size, self.dim))
+        self.weight = nn.Parameter(torch.empty(self.vocab_size, self.embed_dim))
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -380,7 +444,7 @@ class NormalizedEmbedding(nn.Module):
         Performs in-place RMS normalization of the weight tensor.
         This method is designed to be called within a `torch.no_grad()` context.
         """
-        self.weight.data = F.normalize(self.weight.data, p=2, dim=1) * self.embed_scale * math.sqrt(self.dim)
+        self.weight.data = F.normalize(self.weight.data, p=2, dim=1) * self.embed_scale * math.sqrt(self.embed_dim)
         if self.padding_idx is not None:
             self.weight.data[self.padding_idx].fill_(0)
 
@@ -399,7 +463,7 @@ class NormalizedEmbedding(nn.Module):
         
     def extra_repr(self) -> str:
         """Adds extra information to the module representation."""
-        s = f'{self.vocab_size}, {self.dim}'
+        s = f'{self.vocab_size}, {self.embed_dim}'
         if self.embed_scale != 1.0:
             s += f', scale={self.embed_scale}'
         return s
@@ -486,6 +550,8 @@ class TokenFlowModel(PreTrainedModel):
         self.tied_word_embeddings = config.tie_word_embeddings
 
         self.token_embed = NormalizedEmbedding(config)
+        self.encoder = Encoder(config)
+        self.decoder = Decoder(config)
         self.time_embed = MLPEmbedder(config)
 
         self.layers = nn.ModuleList()
@@ -494,13 +560,13 @@ class TokenFlowModel(PreTrainedModel):
 
         if config.tie_word_embeddings:
             self.final_layer_norm = nn.LayerNorm(
-                config.dim,
+                config.embed_dim,
                 eps=config.norm_eps,
                 elementwise_affine=True
             )
         else:
-            self.final_layer_norm = RMSNorm(config.dim, eps=config.norm_eps)
-            self.output_proj = nn.Linear(config.dim, config.vocab_size, bias=False)
+            self.final_layer_norm = RMSNorm(config.embed_dim, eps=config.norm_eps)
+            self.output_proj = nn.Linear(config.embed_dim, config.vocab_size, bias=False)
             
         freqs_cis = precompute_freqs_cis(
             self.dim//self.n_heads, self.ctx_len, config.rope_scaling)
@@ -515,7 +581,6 @@ class TokenFlowModel(PreTrainedModel):
             ).to(device)
             self.register_buffer("_freqs_cis", freqs_cis, persistent=False)
         return self._freqs_cis
-        
         
     def _compute_singular_logits(
         self, 
@@ -552,6 +617,8 @@ class TokenFlowModel(PreTrainedModel):
         for layer in self.layers:
             layer.reset_parameters()
         self.final_layer_norm.reset_parameters()
+        self.encoder.reset_parameters()
+        self.decoder.reset_parameters()
         if not self.tied_word_embeddings:
             self.output_proj.reset_parameters()
 
@@ -578,8 +645,7 @@ class TokenFlowModel(PreTrainedModel):
         if labels is not None:
             return self.training_forward(input_ids, labels)
 
-        return self.inference_forward(input_ids, start_pos, time)
-        
+        return self.inference_forward(input_ids, start_pos, time)        
 
     def training_forward(self, input_ids: torch.Tensor, labels: torch.Tensor):
         """
@@ -602,8 +668,9 @@ class TokenFlowModel(PreTrainedModel):
         t_full = t_sample.repeat(1, seq_len).unsqueeze(-1)
         
         h = rectified_flow_interpolate(x0, x1, t_full)
+        xt = h  # This should be in embed_dim
+        h = self.encoder(h)
         t_vec = self.time_embed(timestep_embedding(t_sample, self.time_dim))
-        xt = h
 
         for layer in self.layers:
             h = layer(h, t_vec, start_pos, freqs_cis, use_cache=False)
@@ -611,6 +678,7 @@ class TokenFlowModel(PreTrainedModel):
         batch_size_, seq_len_ = labels.shape
         assert batch_size_ == batch_size and seq_len_ == seq_len, f"Labels must match the shape of input {input_ids.shape}. Got {labels.shape}."
 
+        h = self.decoder(h)
         h = self.final_layer_norm(h)
         if self.tied_word_embeddings:
             model_logits = F.linear(h, self.token_embed.weight, None)
@@ -630,7 +698,6 @@ class TokenFlowModel(PreTrainedModel):
             loss=loss,
             logits=logits
         )
-        
 
     @torch.inference_mode()
     def inference_forward(self, h: torch.Tensor, start_pos: int, time: float):
@@ -650,31 +717,30 @@ class TokenFlowModel(PreTrainedModel):
         freqs_cis = self._rope_cache(h.device)
         freqs_cis = freqs_cis[start_pos : start_pos + seq_len]
 
+        xt = h  # This is in embed_dim from the input
+        h = self.encoder(h)
         t_sample = torch.full((batch_size, 1), time, device=h.device)
         t_vec = self.time_embed(timestep_embedding(t_sample, self.time_dim))
-        xt = h
 
         for layer in self.layers:
             h = layer(h, t_vec, start_pos, freqs_cis, use_cache=True)
 
+        h = self.decoder(h)
         h = self.final_layer_norm(h)
         if self.tied_word_embeddings:
             model_logits = F.linear(h, self.token_embed.weight, None)
         else:
             model_logits = self.output_proj(h)
-
-        singular_logits = self._compute_singular_logits(xt, t_sample, std=self.embed_scale)
+        singular_logits = self._compute_singular_logits(xt, t_sample.unsqueeze(-1), std=self.embed_scale)
         logits = model_logits + singular_logits
 
         return CausalLMOutput(logits=logits)
-    
     
     @torch.inference_mode()
     def generate(
         self,
         batch_size: int,
         time_schedule: List[float],
-        bos_id: int = 1,
         eos_id: int = 1,
     ) -> Tuple[List[List[int]]]:
         """
@@ -695,8 +761,9 @@ class TokenFlowModel(PreTrainedModel):
         
         total_len = self.ctx_len
         device = self.token_embed.weight.device
+        self.token_embed._normalize_weights()
 
-        x_t = torch.randn(batch_size, total_len, self.dim, device=device) * self.embed_scale
+        x_t = torch.randn(batch_size, total_len, self.token_embed.embed_dim, device=device) * self.embed_scale
 
         for i, (time, next_time) in enumerate(zip(time_schedule[:-1], time_schedule[1:])):
             logits = self.inference_forward(x_t, start_pos=0, time=time).logits
@@ -706,7 +773,7 @@ class TokenFlowModel(PreTrainedModel):
             alpha = (next_time - time) / (1 - time)
             x_t.lerp_(x1t, alpha)
         
-        x1_flat = x_t.reshape(-1, self.dim)
+        x1_flat = x_t.reshape(-1, self.token_embed.embed_dim)
 
         dist = torch.cdist(x1_flat, self.token_embed.weight)
         closest = dist.argmin(dim=1)

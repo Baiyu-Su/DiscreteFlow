@@ -29,7 +29,7 @@ from model import TokenFlowConfig
 # -----------------------------------------------------------------------------
 from model import TokenFlowModel  # noqa: E402
 
-# python3 examine.py --ckpt_dir ./out_small --tokenizer_dir ./.hf_llama --batch_size 8
+# torchrun --standalone --nproc_per_node=1 examine.py --ckpt_dir ./out_small_causal_encoder --tokenizer_dir ./.hf_llama --batch_size 8
 
 
 def parse_args():
@@ -68,13 +68,12 @@ def main() -> None:
     tokenizer.padding_side = "right"
     
     model_config = TokenFlowConfig(
-        blk_num = 8,
-        blk_size = 128,            # <-- change to match your training
-        vocab_size=32000,   # same as you used in training
-        dim=768,           # ...
-        n_heads=6,
+        ctx_len=1024,
+        vocab_size=32000,
+        dim=768,
+        n_heads=12,
         n_layers=12,
-        tie_word_embeddings=True
+        tie_word_embeddings=True,
     )
 
     # ------------------------------------------------------------------
@@ -93,7 +92,7 @@ def main() -> None:
     model.to("cuda")
     model.eval()
     
-    time_schedule = np.linspace(0, 1., 128)
+    time_schedule = np.linspace(0, 1., 512)
 
     # ------------------------------------------------------------------
     # Perform unconditional generation.
@@ -102,7 +101,6 @@ def main() -> None:
         samples = model.generate(
             batch_size=args.batch_size,
             time_schedule=time_schedule,
-            bos_id=tokenizer.bos_token_id,
             eos_id=tokenizer.eos_token_id,
         )
 
