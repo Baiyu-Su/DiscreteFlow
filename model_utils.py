@@ -319,77 +319,87 @@ def row_rms(w: torch.Tensor, eps: float) -> torch.Tensor:
     return w.pow(2).mean(dim=1, keepdim=True).add(eps).sqrt()
 
 
-# def sample_posterior_gumbel_direct(logits: torch.Tensor, token_idx: torch.Tensor) -> torch.Tensor:
-#     """
-#     Sample Gumbel noise vectors from the posterior distribution P(G | argmax(L+G) = token_idx).
-    
-#     This is a direct sampling method where one component is sampled from a truncated Gumbel.
-#     This does NOT guarantee the output is a standard Gumbel vector.
+def sample_gumbel(shape, beta=1, mu=0, eps=1e-20, device=None):
+    """Sample from Gumbel(mu, beta)."""
+    U = torch.rand(size=shape, device=device)
+    return -torch.log(-torch.log(U + eps) + eps) * beta + mu
 
-#     Args:
-#         logits: Tensor of shape (B, T, V) - Teacher model logits
-#         token_idx: Tensor of shape (B, T) - Ground truth tokens
+
+def sample_posterior_gumbel_truncated(logits: torch.Tensor, token_idx: torch.Tensor) -> torch.Tensor:
+    """
+    Sample Gumbel noise vectors from the posterior distribution P(G | argmax(L+G) = token_idx).
     
-#     Returns:
-#         Gumbel noise tensor of shape (B, T, V) satisfying the argmax constraint
-#     """
-#     # 1. Sample a full standard Gumbel vector
-#     gumbel_full = -torch.log(-torch.log(torch.rand_like(logits) + 1e-20) + 1e-20)
+    This is a direct sampling method where one component is sampled from a truncated Gumbel.
+    This does NOT guarantee the output is a standard Gumbel vector.
+
+    Args:
+        logits: Tensor of shape (B, T, V) - Teacher model logits
+        token_idx: Tensor of shape (B, T) - Ground truth tokens
     
-#     # 2. Find the maximum value among competitors (all tokens except the correct one)
-#     # Mask out the correct token by setting its logit to a very negative value
-#     masked_logits = logits.scatter(-1, token_idx.unsqueeze(-1), -1e9)
-#     max_others = (masked_logits + gumbel_full).max(dim=-1, keepdim=True).values
+    Returns:
+        Gumbel noise tensor of shape (B, T, V) satisfying the argmax constraint
+    """
+    # 1. Sample a full standard Gumbel vector
+    gumbel_full = -torch.log(-torch.log(torch.rand_like(logits) + 1e-20) + 1e-20)
     
-#     # 3. Compute truncation point for the winning Gumbel
-#     # The winning token's Gumbel value must be > (max_others - logits_correct)
-#     truncation_point = max_others - logits.gather(-1, token_idx.unsqueeze(-1))
+    # 2. Find the maximum value among competitors (all tokens except the correct one)
+    # Mask out the correct token by setting its logit to a very negative value
+    masked_logits = logits.scatter(-1, token_idx.unsqueeze(-1), -1e9)
+    max_others = (masked_logits + gumbel_full).max(dim=-1, keepdim=True).values
     
-#     # 4. Sample from truncated Gumbel distribution using inverse transform sampling
-#     # F(t) = exp(-exp(-t)) is the Gumbel CDF
-#     F_t = torch.exp(-torch.exp(-truncation_point))
+    # 3. Compute truncation point for the winning Gumbel
+    # The winning token's Gumbel value must be > (max_others - logits_correct)
+    truncation_point = max_others - logits.gather(-1, token_idx.unsqueeze(-1))
     
-#     # Sample uniform from [F(t), 1] then apply inverse CDF
-#     U_t = F_t + torch.rand_like(F_t) * (1 - F_t)
-#     gumbel_x_new = -torch.log(-torch.log(U_t + 1e-20) + 1e-20)
+    # 4. Sample from truncated Gumbel distribution using inverse transform sampling
+    # F(t) = exp(-exp(-t)) is the Gumbel CDF
+    F_t = torch.exp(-torch.exp(-truncation_point))
     
-#     # 5. Replace the winning token's Gumbel value
-#     final_gumbel = gumbel_full.scatter(-1, token_idx.unsqueeze(-1), gumbel_x_new)
+    # Sample uniform from [F(t), 1] then apply inverse CDF
+    U_t = F_t + torch.rand_like(F_t) * (1 - F_t)
+    gumbel_x_new = -torch.log(-torch.log(U_t + 1e-20) + 1e-20)
     
-#     return final_gumbel
+    # 5. Replace the winning token's Gumbel value
+    final_gumbel = gumbel_full.scatter(-1, token_idx.unsqueeze(-1), gumbel_x_new)
+    
+    return final_gumbel
 
 
 def sample_posterior_gumbel(logits: torch.Tensor, token_idx: torch.Tensor) -> torch.Tensor:
     """
-    Sample from the posterior distribution P(z | argmax(z) = token_idx) using the
-    Gumbel-Top trick, where z is constructed to be a standard Gumbel vector
-    if token_idx is sampled from softmax(logits).
+    Sample from the posterior distribution P(z | argmax(z + logits) = token_idx) using the
+    exact functional Gumbel-Max trick. This version is optimized for memory and speed.
 
     Args:
         logits: Tensor of shape (B, T, V) - Teacher model logits.
         token_idx: Tensor of shape (B, T) - Ground truth tokens.
 
     Returns:
-        A Gumbel-like vector `z` of shape (B, T, V) satisfying argmax(z) = token_idx.
+        A Gumbel-like vector `z` of shape (B, T, V) satisfying argmax(z + logits) = token_idx.
     """
-    # 1. Sample a standard Gumbel vector 
-    gumbel_std = -torch.log(-torch.log(torch.rand_like(logits, dtype=torch.float32) + 1e-20) + 1e-20)
+    # Reshape for processing
+    B, T, V = logits.shape
+    logits_flat = logits.reshape(B * T, V)
+    token_idx_flat = token_idx.reshape(B * T)
+    
+    log_p = F.log_softmax(logits_flat, dim=-1)
+    
+    batch_size, dim = log_p.shape # (B*T, V)
 
-    # 2. Get log-probabilities from the teacher model
-    log_p = F.log_softmax(logits, dim=-1)
+    # Sample Gumbel noise
+    xi0 = sample_gumbel((batch_size, 1), device=logits.device)
+    xii = sample_gumbel((batch_size, dim), device=logits.device)
+    
+    # Use logaddexp for numerical stability and memory efficiency
+    # This computes log(exp(a) + exp(b)) which is more stable than doing it directly
+    # Here, a = -xii and b = -xi0 + log_p
+    post_gumbel_sample = -torch.logaddexp(-xii, -xi0 + log_p)
+    
+    # Get indices for in-place update
+    batch_indices = torch.arange(batch_size, device=logits.device)
+    
+    # In-place update for the selected token using the formula
+    post_gumbel_sample[batch_indices, token_idx_flat] = (xi0.squeeze(-1) - log_p[batch_indices, token_idx_flat])
 
-    # 3. Get the Gumbel noise for the winning token
-    # .unsqueeze(-1) is for broadcasting
-    gumbel_k = gumbel_std.gather(-1, token_idx.unsqueeze(-1))
-
-    # 4. Calculate the values for all other tokens using the Gumbel-Top formula
-    # z_i = -log(exp(-kesi_i - log p_i) + exp(-kesi_k))
-    # This can be computed stably with logaddexp: log(a+b) = log(exp(log(a)) + exp(log(b)))
-    # z_i = -logaddexp(-kesi_i - log p_i, -kesi_k)
-    z_all = -torch.logaddexp(-gumbel_std - log_p, -gumbel_k)
-
-    # 5. The value for the winning token k should just be kesi_k
-    # We use scatter to replace the k-th component in z_all with kesi_k.
-    final_z = z_all.scatter(-1, token_idx.unsqueeze(-1), gumbel_k)
-
-    return final_z
+    # Reshape back to original (B, T, V)
+    return post_gumbel_sample.reshape(B, T, V)
