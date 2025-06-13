@@ -66,6 +66,7 @@ def load_model_config(ckpt_dir):
         config_dict = json.load(f)
     
     # Create TokenFlowConfig from the saved configuration
+    # Preserve use_gumbel_flow from training to ensure consistent noise distribution
     model_config = TokenFlowConfig(
         ctx_len=config_dict.get("ctx_len", 256),
         vocab_size=config_dict.get("vocab_size", 32000),
@@ -74,7 +75,8 @@ def load_model_config(ckpt_dir):
         n_layers=config_dict.get("n_layers", 8),
         tie_word_embeddings=config_dict.get("tie_word_embeddings", True),
         use_causal=config_dict.get("use_causal", False),
-        use_gumbel_flow=config_dict.get("use_gumbel_flow", False),
+        use_gumbel_flow=config_dict.get("use_gumbel_flow", False),  # Preserve from training
+        teacher_model_name=config_dict.get("teacher_model_name"),  # Include teacher model name if present
     )
     
     return model_config
@@ -91,7 +93,10 @@ def main() -> None:
     
     print(f"Model config: ctx_len={model_config.ctx_len}, dim={model_config.dim}, "
           f"n_layers={model_config.n_layers}, n_heads={model_config.n_heads}, "
-          f"use_causal={model_config.use_causal}")
+          f"use_causal={model_config.use_causal}, use_gumbel_flow={model_config.use_gumbel_flow}")
+    
+    if model_config.use_gumbel_flow:
+        print("Note: Using Gumbel flow initialization for generation (trained with teacher model distillation)")
 
     # ------------------------------------------------------------------
     # Tokenizer: use appropriate tokenizer based on vocab_size

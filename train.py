@@ -62,14 +62,14 @@ class StatsLoggingCallback(TrainerCallback):
         # Register the hook for each relevant parameter
         for name, module in self.model.named_modules():
             if isinstance(module, (nn.LayerNorm, RMSNorm, NormalizedEmbedding)):
-                if hasattr(module, 'weight') and module.weight is not None:
+                if hasattr(module, 'weight') and module.weight is not None and module.weight.requires_grad:
                     # The hook will be named after the module's weight parameter
                     param_name = f"{name}.weight"
                     module.weight.register_hook(make_hook(param_name))
-                elif hasattr(module, 'raw_weight') and module.raw_weight is not None:
+                elif hasattr(module, 'raw_weight') and module.raw_weight is not None and module.raw_weight.requires_grad:
                     # The hook will be named after the module's weight parameter
                     param_name = f"{name}.raw_weight"
-                    module.weight.register_hook(make_hook(param_name))
+                    module.raw_weight.register_hook(make_hook(param_name))
 
     # on_train_batch_end is no longer needed for gradients
     # def on_train_batch_end(...):

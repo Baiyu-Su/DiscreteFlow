@@ -520,16 +520,26 @@ class TokenFlowModel(PreTrainedModel):
         # Teacher model for Gumbel reflow
         self.teacher_model = None
         if config.use_gumbel_flow:
-            if not config.teacher_model_name:
-                raise ValueError("`teacher_model_name` must be specified when `use_gumbel_flow` is True.")
+            # Only load teacher model if teacher_model_name is provided
+            # During inference, we may not need the teacher model
+            if config.teacher_model_name:
+                print(f"Loading teacher model: {config.teacher_model_name}")
+                from transformers import AutoModelForCausalLM
+                # load local or hub checkpoints
+                self.teacher_model = AutoModelForCausalLM.from_pretrained(
+                    config.teacher_model_name,
+                )
+                self.teacher_model.requires_grad_(False)
+                self.teacher_model.eval()
+                
+                # Count teacher model parameters
+                teacher_params = sum(p.numel() for p in self.teacher_model.parameters())
+                print(f"Teacher model loaded successfully! ({teacher_params:,} parameters)")
+                print("Teacher model set to eval mode with requires_grad=False")
             
-            from transformers import AutoModelForCausalLM
-            # load local or hub checkpoints
-            self.teacher_model = AutoModelForCausalLM.from_pretrained(
-                config.teacher_model_name,
-            )
-            self.teacher_model.requires_grad_(False)
-            self.teacher_model.eval()
+            else:
+                print("Note: Gumbel flow enabled but no teacher model specified (inference mode)")
+
     
     def _rope_cache(self, device):
         if (not hasattr(self, "_freqs_cis") or self._freqs_cis.device != device):
@@ -579,6 +589,15 @@ class TokenFlowModel(PreTrainedModel):
         self.final_layer_norm.reset_parameters()
         if not self.tied_word_embeddings:
             self.output_proj.reset_parameters()
+    
+    def state_dict(self, *args, **kwargs):
+        """Override state_dict to exclude teacher model weights."""
+        state_dict = super().state_dict(*args, **kwargs)
+        # Remove teacher model weights from state dict to avoid saving them
+        keys_to_remove = [key for key in state_dict.keys() if key.startswith('teacher_model.')]
+        for key in keys_to_remove:
+            del state_dict[key]
+        return state_dict
 
     def forward(
         self, 
@@ -631,7 +650,7 @@ class TokenFlowModel(PreTrainedModel):
             # Alternatives: (need input projection, and changes in the generate function)
             # gumbel_type == "softmax_gumbel", x0 = softmax(gumbel), x1 = one-hot(input_ids)
             # gumbel_type == "gumbel_log_onehot", x0 = gumbel, x1 = log(one-hot(input_ids)) 
-            assert self.teacher_model is not None
+            assert self.teacher_model is not None, "Teacher model should be loaded when use_gumbel_flow=True"
             
             with torch.no_grad():
                 teacher_output = self.teacher_model(input_ids)

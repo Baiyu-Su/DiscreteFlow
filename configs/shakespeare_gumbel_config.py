@@ -5,12 +5,12 @@ class MyConfig:
     run_name = "shakespeare_tokenflow_gumbel"
     load_stats = True
 
-    # Model config - same as teacher for consistency
+    # Model config
     vocab_size = 32000  # LLaMA tokenizer vocab size
     dim = 512
     n_heads = 8
     n_layers = 8
-    tie_word_embeddings = True
+    tie_word_embeddings = False
     
     # Gumbel reflow parameters
     use_gumbel_flow = True

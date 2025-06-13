@@ -1,7 +1,7 @@
 class MyConfig:
-    ctx_len = 128
+    ctx_len = 512
 
-    output_dir = "/u/chizhang/scratch/data/out_fineweb_tokenflow"
+    output_dir = f"/u/chizhang/scratch/data/out_fineweb_tokenflow_ctx{ctx_len}"
     run_name = "fineweb_tokenflow_baseline"
     load_stats = True
 
