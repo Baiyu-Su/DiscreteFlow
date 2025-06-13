@@ -8,8 +8,8 @@
 
 ## Dataset Information
 
-- **Dataset**: `tiny_shakespeare`
-- **Tokenizer**: LLaMA tokenizer (`huggyllama/llama-7b`)
+- **Shakespeare Dataset**: Uses LLaMA tokenizer (`huggyllama/llama-7b`, vocab_size=32000)
+- **FineWeb Dataset**: Uses GPT-2 tokenizer (`gpt2`, vocab_size=50257) because we want to use GPT-2 as teacher first. Llama models are at least 1B+.
 
 ## 1. Original TokenFlow Training
 
@@ -43,22 +43,6 @@ python train.py --config configs/shakespeare_gumbel_config.py --dataset shakespe
 ```bash
 python train.py --config configs/shakespeare_gumbel_config.py --dataset shakespeare --causal
 ```
-## Configuration Files
-
-### shakespeare_baseline_config.py
-- Original TokenFlow baseline
-- 128 context length, 8 layers, 8 heads (context length could be larger)
-- 10,000 training steps
-
-### shakespeare_teacher_config.py  
-- Standard LLaMA architecture
-- Same size as TokenFlow (512 dim, 8 layers)
-- 5,000 training steps 
-
-### shakespeare_gumbel_config.py
-- TokenFlow with Gumbel reflow enabled
-- Points to trained teacher model
-- 5,000 training steps
 
 ## 3. FineWeb Experiments
 
@@ -86,7 +70,7 @@ python train.py --config configs/fineweb_gumbel_config.py --dataset fineweb
 python train.py --config configs/fineweb_gumbel_config.py --dataset fineweb --causal
 ```
 
-**Note:** Using `gpt2` (~124M params) as the pretrained teacher model. 
+**Note:** Using `gpt2` (~124M params) as the pretrained teacher model with matching GPT-2 tokenizer. 
 
 ## Configuration Files (FineWeb)
 
@@ -113,4 +97,36 @@ python train.py --config configs/fineweb_gumbel_config.py --dataset fineweb --ca
 2. **Steps 3.2** (Gumbel causal/non-causal) can run immediately (uses pretrained teacher)
 
 
-**Note:** Teacher model training is only needed for Shakespeare, for FineWeb we can use pretrained GPT-2 or larger models.
+**Note:** Teacher model training is only needed for Shakespeare (uses LLaMA tokenizer), for FineWeb we use pretrained GPT-2 with matching GPT-2 tokenizer.
+
+## 4. Text Sampling from Trained Models
+
+Use `examine.py` to generate text samples from any trained TokenFlow model. The script automatically loads the model configuration from the checkpoint directory.
+
+### Shakespeare Model Sampling
+
+```bash
+# Sample from baseline models
+python examine.py --ckpt_dir /u/chizhang/scratch/data/out_shakespeare_tokenflow/checkpoint-1000 --batch_size 8
+
+python examine.py --ckpt_dir /u/chizhang/scratch/data/out_shakespeare_tokenflow-causal/checkpoint-1000 --batch_size 8
+
+# Sample from Gumbel models (once training completes and saves checkpoints)
+python examine.py --ckpt_dir /u/chizhang/scratch/data/out_shakespeare_gumbel/checkpoint-1000 --batch_size 8
+
+python examine.py --ckpt_dir /u/chizhang/scratch/data/out_shakespeare_gumbel-causal/checkpoint-1000 --batch_size 8
+```
+
+### FineWeb Model Sampling
+
+```bash
+# Sample from baseline models
+python examine.py --ckpt_dir /u/chizhang/scratch/data/out_fineweb_tokenflow/checkpoint-5000 --batch_size 8
+
+# Sample from Gumbel models
+python examine.py --ckpt_dir /u/chizhang/scratch/data/out_fineweb_gumbel/checkpoint-5000 --batch_size 8
+
+# Sample from causal models (if trained with --causal flag)
+python examine.py --ckpt_dir /u/chizhang/scratch/data/out_fineweb_baseline_causal/checkpoint-5000 --batch_size 8
+python examine.py --ckpt_dir /u/chizhang/scratch/data/out_fineweb_gumbel_causal/checkpoint-5000 --batch_size 8
+```

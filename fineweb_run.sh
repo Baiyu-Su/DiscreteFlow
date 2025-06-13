@@ -1,0 +1,1 @@
+python -u train.py --config configs/fineweb_baseline_config.py --dataset fineweb --output_dir /u/chizhang/scratch/data/out_fineweb_baseline_noncausal

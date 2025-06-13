@@ -1,407 +1,0 @@
-You are using the default legacy behaviour of the <class 'transformers.models.llama.tokenization_llama.LlamaTokenizer'>. This is expected, and simply means that the `legacy` (previous) behavior will be used so nothing changes for you. If you want to use the new behaviour, set `legacy=False`. This should only be set if you understand what it means, and thoroughly read the reason why this was added as explained in https://github.com/huggingface/transformers/pull/24565 - if you loaded a llama tokenizer from a GGUF file you can ignore this message
-Shakespeare dataset processing:
-  Full text length: 1,003,854 characters
-  Chunk size: 256, Overlap: 255
-  Total chunks created: 1003600
-  Training chunks: 903240
-  Validation chunks: 100360
-Final dataset sizes:
-  Training examples: 2352
-  Validation examples: 262
---- Example 0 ---
-Input IDs  : [619, 300, 674, 29879, 372, 577, 29889, 13, 5328, 338, 29915, 29873, 29892, 590, 10752, 29973, 1235, 29915, 29879, 5193, 29936, 372, 338, 451, 2462, 29889, 13, 13, 29967, 29965, 5265, 2544, 29901, 13, 3112, 338, 29892, 372, 338, 29901, 298, 347, 8151, 29892, 367, 7695, 29892, 3448, 29991, 13, 3112, 338, 278, 301, 935, 393, 269, 886, 577, 714, 310, 260, 1540, 29892, 13, 855, 336, 2827, 4023, 845, 2313, 4339, 322, 443, 552, 5832, 528, 279, 567, 29889, 13, 9526, 1827, 278, 301, 935, 3732, 14225, 8542, 29936, 13, 4013, 270, 720, 451, 577, 29892, 363, 1183, 25227, 621, 502, 29901, 13, 9526, 1827, 278, 301, 935, 322, 658, 14139, 304, 328, 1735, 5076, 29892, 13, 29949, 29892, 1286, 306, 723, 896, 750, 3939, 28848, 2086, 29991, 13, 23036, 5075, 515, 5075, 393, 7314, 270, 720, 502, 2756, 764, 29892, 13, 29950, 348, 1259, 14904, 8151, 411, 298, 1657, 29915, 29879, 29899, 786, 304, 278, 2462, 29892, 13, 29949, 29892, 1286, 367, 7695, 29936, 901, 3578, 322, 3578, 372, 25088, 29889, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
-
- Decoded in :  liet wills it so.
-How is't, my soul? let's talk; it is not day.
-
-JULIET:
-It is, it is: hie hence, be gone, away!
-It is the lark that sings so out of tune,
-Straining harsh discords and unpleasing sharps.
-Some say the lark makes sweet division;
-This doth not so, for she divideth us:
-Some say the lark and loathed toad change eyes,
-O, now I would they had changed voices too!
-Since arm from arm that voice doth us affray,
-Hunting thee hence with hunt's-up to the day,
-O, now be gone; more light and light it grows.</s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s>
-
- Decoded lbl: liet wills it so.
-How is't, my soul? let's talk; it is not day.
-
-JULIET:
-It is, it is: hie hence, be gone, away!
-It is the lark that sings so out of tune,
-Straining harsh discords and unpleasing sharps.
-Some say the lark makes sweet division;
-This doth not so, for she divideth us:
-Some say the lark and loathed toad change eyes,
-O, now I would they had changed voices too!
-Since arm from arm that voice doth us affray,
-Hunting thee hence with hunt's-up to the day,
-O, now be gone; more light and light it grows.
-
---- Example 1 ---
-Input IDs  : [302, 29892, 322, 16646, 1075, 1250, 1449, 29889, 13, 13, 6154, 1718, 1430, 4741, 29901, 13, 29909, 2217, 3974, 338, 9098, 3147, 29881, 1145, 714, 29936, 13, 8809, 436, 29892, 1641, 8812, 29915, 29881, 29892, 27515, 2609, 439, 264, 305, 29889, 13, 13, 29956, 1718, 29956, 2965, 29968, 29901, 13, 797, 3362, 6669, 11750, 306, 505, 1565, 29899, 23057, 287, 7875, 29892, 13, 3664, 5478, 262, 681, 297, 10776, 29892, 3447, 14288, 297, 1370, 29936, 13, 1349, 852, 674, 306, 1818, 261, 701, 29901, 322, 12595, 29892, 1487, 15183, 663, 29892, 13, 2713, 1997, 23546, 701, 297, 2166, 600, 28387, 29892, 4186, 17976, 29892, 322, 297, 13272, 29892, 13, 1576, 889, 5861, 322, 26703, 304, 2041, 411, 14904, 29901, 13, 1349, 283, 29892, 8099, 4526, 3437, 29892, 297, 16281, 16094, 29892, 13, 29940, 2072, 314, 12533, 322, 297, 951, 293, 28910, 14812, 29892, 528, 1997, 1284, 13, 28154, 1532, 1343, 1312, 304, 8293, 825, 12595, 1899, 29915, 303, 29901, 13, 2855, 12595, 29892, 26565, 9471, 1454, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
-
- Decoded in :  n, and beat him back again.
-
-CLARENCE:
-A little fire is quickly trodden out;
-Which, being suffer'd, rivers cannot quench.
-
-WARWICK:
-In Warwickshire I have true-hearted friends,
-Not mutinous in peace, yet bold in war;
-Those will I muster up: and thou, son Clarence,
-Shalt stir up in Suffolk, Norfolk, and in Kent,
-The knights and gentlemen to come with thee:
-Thou, brother Montague, in Buckingham,
-Northampton and in Leicestershire, shalt find
-Men well inclined to hear what thou command'st:
-And thou, brave Oxfor</s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s>
-
- Decoded lbl: n, and beat him back again.
-
-CLARENCE:
-A little fire is quickly trodden out;
-Which, being suffer'd, rivers cannot quench.
-
-WARWICK:
-In Warwickshire I have true-hearted friends,
-Not mutinous in peace, yet bold in war;
-Those will I muster up: and thou, son Clarence,
-Shalt stir up in Suffolk, Norfolk, and in Kent,
-The knights and gentlemen to come with thee:
-Thou, brother Montague, in Buckingham,
-Northampton and in Leicestershire, shalt find
-Men well inclined to hear what thou command'st:
-And thou, brave Oxfor
-
---- Example 2 ---
-Input IDs  : [269, 29892, 470, 901, 29892, 670, 29563, 29892, 13, 1762, 671, 590, 4307, 1319, 22378, 29991, 13, 13, 25951, 29943, 1367, 29902, 3308, 29901, 13, 797, 2929, 296, 21031, 262, 29991, 13, 13, 3596, 2138, 29886, 381, 4097, 29901, 13, 29968, 453, 29892, 12088, 29892, 12088, 29892, 12088, 29892, 12088, 1075, 29991, 13, 13, 29931, 4339, 29901, 13, 29144, 29892, 4808, 29892, 4808, 29892, 4808, 29991, 13, 13, 25951, 29943, 1367, 29902, 3308, 29901, 13, 3421, 15996, 5835, 29879, 29892, 8293, 592, 7726, 29889, 13, 13, 6730, 6171, 29901, 13, 29949, 323, 913, 375, 7839, 13, 13, 11863, 6171, 29901, 13, 1349, 283, 14973, 2309, 263, 316, 287, 988, 271, 659, 473, 674, 591, 1022, 29889, 13, 13, 1349, 1823, 6171, 29901, 13, 29911, 949, 451, 2501, 1075, 29889, 27863, 599, 29892, 367, 11813, 29936, 13, 22908, 701, 596, 269, 9303, 29889, 13, 13, 25951, 29943, 1367, 29902, 3308, 29901, 13, 3421, 301, 4339, 29892, 746, 366, 4091, 1073, 489, 294, 297, 445, 1153, 479, 29892, 13, 1184, 29894, 12504, 491, 1075, 29892, 366, 2609, 489, 1552, 2107, 9703, 13, 8809, 436, 445, 767, 29915, 29879, 2834, 1258, 288, 705, 366, 29892, 366, 29915, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
-
- Decoded in :  s, or more, his tribe,
-To use my lawful sword!
-
-AUFIDIUS:
-Insolent villain!
-
-All Conspirators:
-Kill, kill, kill, kill, kill him!
-
-Lords:
-Hold, hold, hold, hold!
-
-AUFIDIUS:
-My noble masters, hear me speak.
-
-First Lord:
-O Tullus,--
-
-Second Lord:
-Thou hast done a deed whereat valour will weep.
-
-Third Lord:
-Tread not upon him. Masters all, be quiet;
-Put up your swords.
-
-AUFIDIUS:
-My lords, when you shall know--as in this rage,
-Provoked by him, you cannot--the great danger
-Which this man's life did owe you, you'</s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s>
-
- Decoded lbl: s, or more, his tribe,
-To use my lawful sword!
-
-AUFIDIUS:
-Insolent villain!
-
-All Conspirators:
-Kill, kill, kill, kill, kill him!
-
-Lords:
-Hold, hold, hold, hold!
-
-AUFIDIUS:
-My noble masters, hear me speak.
-
-First Lord:
-O Tullus,--
-
-Second Lord:
-Thou hast done a deed whereat valour will weep.
-
-Third Lord:
-Tread not upon him. Masters all, be quiet;
-Put up your swords.
-
-AUFIDIUS:
-My lords, when you shall know--as in this rage,
-Provoked by him, you cannot--the great danger
-Which this man's life did owe you, you'
-
---- Example 3 ---
-Input IDs  : [321, 381, 8760, 29892, 1795, 2253, 19531, 1009, 15883, 13, 1349, 273, 777, 393, 505, 28886, 963, 19531, 1009, 298, 1446, 29889, 13, 6246, 2041, 29892, 590, 18120, 29892, 1235, 502, 3448, 29889, 13, 13, 15715, 1254, 4214, 29903, 29901, 13, 8120, 373, 1434, 29936, 306, 29915, 645, 5193, 411, 445, 1781, 10404, 29889, 13, 5328, 1286, 29892, 8889, 19856, 29991, 920, 5771, 278, 3186, 411, 14904, 29973, 13, 13, 29925, 1295, 29884, 440, 424, 29901, 13, 1576, 2253, 393, 596, 18120, 3527, 3113, 304, 2244, 29889, 13, 13, 15715, 1254, 4214, 29903, 29901, 13, 29902, 2649, 14904, 29892, 767, 29892, 525, 28898, 2253, 411, 592, 1286, 13, 1349, 273, 746, 306, 1539, 14904, 1833, 988, 1286, 591, 5870, 29901, 13, 11760, 471, 306, 2675, 27314, 304, 278, 23615, 29892, 13, 2059, 278, 8998, 310, 278, 26624, 29915, 29879, 394, 3687, 29936, 13, 6246, 1286, 29892, 306, 2649, 14904, 489, 17462, 372, 304, 266, 952, 761, 489, 13, 4013, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
-
- Decoded in :  eir truth, might better wear their heads
-Than some that have accused them wear their hats.
-But come, my lord, let us away.
-
-HASTINGS:
-Go on before; I'll talk with this good fellow.
-How now, sirrah! how goes the world with thee?
-
-Pursuivant:
-The better that your lordship please to ask.
-
-HASTINGS:
-I tell thee, man, 'tis better with me now
-Than when I met thee last where now we meet:
-Then was I going prisoner to the Tower,
-By the suggestion of the queen's allies;
-But now, I tell thee--keep it to thyself--
-This</s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s></s>
-
- Decoded lbl: eir truth, might better wear their heads
-Than some that have accused them wear their hats.
-But come, my lord, let us away.
-
-HASTINGS:
-Go on before; I'll talk with this good fellow.
-How now, sirrah! how goes the world with thee?
-
-Pursuivant:
-The better that your lordship please to ask.
-
-HASTINGS:
-I tell thee, man, 'tis better with me now
-Than when I met thee last where now we meet:
-Then was I going prisoner to the Tower,
-By the suggestion of the queen's allies;
-But now, I tell thee--keep it to thyself--
-This
-
-wandb: Currently logged in as: chizhang-cs (chizhang-cs-the-university-of-texas-at-austin) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
-wandb: Tracking run with wandb version 0.19.11
-wandb: Run data is saved locally in /u/chizhang/Projects/DiscreteFlow/wandb/run-20250612_201541-58ywa92r
-wandb: Run `wandb offline` to turn off syncing.
-wandb: Syncing run shakespeare_tokenflow_baseline
-wandb: ⭐️ View project at https://wandb.ai/chizhang-cs-the-university-of-texas-at-austin/TokenFlow
-wandb: 🚀 View run at https://wandb.ai/chizhang-cs-the-university-of-texas-at-austin/TokenFlow/runs/58ywa92r
-2025-06-12 20:15:42.507 | INFO     | __main__:main:331 - Model Configuration:
-{'_attn_implementation_autoset': True,
- '_name_or_path': '',
- 'add_cross_attention': False,
- 'architectures': None,
- 'bad_words_ids': None,
- 'begin_suppress_tokens': None,
- 'bos_token_id': None,
- 'chunk_size_feed_forward': 0,
- 'cross_attention_hidden_size': None,
- 'ctx_len': 256,
- 'decoder_start_token_id': None,
- 'dim': 512,
- 'diversity_penalty': 0.0,
- 'do_sample': False,
- 'early_stopping': False,
- 'embed_scale': 0.044194173824159216,
- 'encoder_no_repeat_ngram_size': 0,
- 'eos_token_id': None,
- 'exponential_decay_length_penalty': None,
- 'finetuning_task': None,
- 'forced_bos_token_id': None,
- 'forced_eos_token_id': None,
- 'hidden_dim': 2048,
- 'id2label': {0: 'LABEL_0', 1: 'LABEL_1'},
- 'init_cutoff_factor': 3.0,
- 'is_decoder': False,
- 'is_encoder_decoder': False,
- 'label2id': {'LABEL_0': 0, 'LABEL_1': 1},
- 'length_penalty': 1.0,
- 'load_stats': True,
- 'max_batch': 64,
- 'max_length': 20,
- 'min_length': 0,
- 'model_type': 'tokenflow',
- 'multiple_of': 64,
- 'n_heads': 8,
- 'n_kv_heads': 8,
- 'n_layers': 8,
- 'no_repeat_ngram_size': 0,
- 'norm_eps': 1e-06,
- 'num_beam_groups': 1,
- 'num_beams': 1,
- 'num_return_sequences': 1,
- 'output_attentions': False,
- 'output_hidden_states': False,
- 'output_scores': False,
- 'pad_token_id': None,
- 'prefix': None,
- 'problem_type': None,
- 'pruned_heads': {},
- 'remove_invalid_values': False,
- 'repetition_penalty': 1.0,
- 'return_dict': True,
- 'return_dict_in_generate': False,
- 'rope_scaling': 10000,
- 'sep_token_id': None,
- 'suppress_tokens': None,
- 'task_specific_params': None,
- 'teacher_model_name': None,
- 'temperature': 1.0,
- 'tf_legacy_loss': False,
- 'tie_encoder_decoder': False,
- 'tie_word_embeddings': True,
- 'time_dim': 256,
- 'tokenizer_class': None,
- 'top_k': 50,
- 'top_p': 1.0,
- 'torch_dtype': None,
- 'torchscript': False,
- 'transformers_version': '4.51.1',
- 'typical_p': 1.0,
- 'use_bfloat16': False,
- 'use_causal': False,
- 'use_gumbel_flow': False,
- 'vocab_size': 32000}
-2025-06-12 20:15:42.508 | INFO     | __main__:main:337 - HuggingFace Training Arguments:
-TrainingArguments(
-_n_gpu=1,
-accelerator_config={'split_batches': False, 'dispatch_batches': None, 'even_batches': True, 'use_seedable_sampler': True, 'non_blocking': False, 'gradient_accumulation_kwargs': None, 'use_configured_state': False},
-adafactor=False,
-adam_beta1=0.9,
-adam_beta2=0.98,
-adam_epsilon=1e-08,
-auto_find_batch_size=False,
-average_tokens_across_devices=False,
-batch_eval_metrics=False,
-bf16=True,
-bf16_full_eval=False,
-data_seed=None,
-dataloader_drop_last=False,
-dataloader_num_workers=4,
-dataloader_persistent_workers=False,
-dataloader_pin_memory=False,
-dataloader_prefetch_factor=None,
-ddp_backend=None,
-ddp_broadcast_buffers=None,
-ddp_bucket_cap_mb=None,
-ddp_find_unused_parameters=False,
-ddp_timeout=1800,
-debug=[],
-deepspeed=None,
-disable_tqdm=False,
-do_eval=True,
-do_predict=False,
-do_train=True,
-eval_accumulation_steps=2,
-eval_delay=0,
-eval_do_concat_batches=True,
-eval_on_start=False,
-eval_steps=500,
-eval_strategy=IntervalStrategy.STEPS,
-eval_use_gather_object=False,
-fp16=False,
-fp16_backend=auto,
-fp16_full_eval=False,
-fp16_opt_level=O1,
-fsdp=[],
-fsdp_config={'min_num_params': 0, 'xla': False, 'xla_fsdp_v2': False, 'xla_fsdp_grad_ckpt': False},
-fsdp_min_num_params=0,
-fsdp_transformer_layer_cls_to_wrap=None,
-full_determinism=False,
-gradient_accumulation_steps=2,
-gradient_checkpointing=False,
-gradient_checkpointing_kwargs=None,
-greater_is_better=None,
-group_by_length=False,
-half_precision_backend=auto,
-hub_always_push=False,
-hub_model_id=None,
-hub_private_repo=None,
-hub_strategy=HubStrategy.EVERY_SAVE,
-hub_token=<HUB_TOKEN>,
-ignore_data_skip=False,
-include_for_metrics=[],
-include_inputs_for_metrics=False,
-include_num_input_tokens_seen=False,
-include_tokens_per_second=False,
-jit_mode_eval=False,
-label_names=None,
-label_smoothing_factor=0.0,
-learning_rate=0.0004,
-length_column_name=length,
-load_best_model_at_end=False,
-local_rank=0,
-log_level=passive,
-log_level_replica=warning,
-log_on_each_node=True,
-logging_dir=/u/chizhang/scratch/data/out_shakespeare_tokenflow/runs/Jun12_20-15-40_dgx-4,
-logging_first_step=False,
-logging_nan_inf_filter=True,
-logging_steps=50,
-logging_strategy=IntervalStrategy.STEPS,
-lr_scheduler_kwargs={},
-lr_scheduler_type=SchedulerType.COSINE,
-max_grad_norm=1.0,
-max_steps=10000,
-metric_for_best_model=None,
-mp_parameters=,
-neftune_noise_alpha=None,
-no_cuda=False,
-num_train_epochs=3.0,
-optim=OptimizerNames.ADAMW_TORCH,
-optim_args=None,
-optim_target_modules=None,
-output_dir=/u/chizhang/scratch/data/out_shakespeare_tokenflow,
-overwrite_output_dir=True,
-past_index=-1,
-per_device_eval_batch_size=64,
-per_device_train_batch_size=64,
-prediction_loss_only=False,
-push_to_hub=False,
-push_to_hub_model_id=None,
-push_to_hub_organization=None,
-push_to_hub_token=<PUSH_TO_HUB_TOKEN>,
-ray_scope=last,
-remove_unused_columns=False,
-report_to=['wandb'],
-restore_callback_states_from_checkpoint=False,
-resume_from_checkpoint=None,
-run_name=/u/chizhang/scratch/data/out_shakespeare_tokenflow,
-save_on_each_node=False,
-save_only_model=False,
-save_safetensors=True,
-save_steps=1000,
-save_strategy=SaveStrategy.STEPS,
-save_total_limit=3,
-seed=42,
-skip_memory_metrics=True,
-tf32=None,
-torch_compile=False,
-torch_compile_backend=None,
-torch_compile_mode=None,
-torch_empty_cache_steps=None,
-torchdynamo=None,
-tp_size=0,
-tpu_metrics_debug=False,
-tpu_num_cores=None,
-use_cpu=False,
-use_ipex=False,
-use_legacy_prediction_loop=False,
-use_liger_kernel=False,
-use_mps_device=False,
-warmup_ratio=0.0,
-warmup_steps=1000,
-weight_decay=0.02,
-)
-2025-06-12 20:15:42.509 | INFO     | __main__:main:338 - Total model parameters: 37771264
-2025-06-12 20:15:42.509 | INFO     | __main__:main:339 - Non-embedding parameters: 21387264
-2025-06-12 20:15:42.574 | INFO     | __main__:main:352 - Let the training begin.
-wandb: WARNING The `run_name` is currently set to the same value as `TrainingArguments.output_dir`. If this was not intended, please specify a different run name by setting the `TrainingArguments.run_name` parameter.
-  0%|          | 0/10000 [00:00<?, ?it/s]  0%|          | 1/10000 [00:02<7:34:09,  2.73s/it]  0%|          | 2/10000 [00:04<5:36:39,  2.02s/it]  0%|          | 3/10000 [00:05<4:58:58,  1.79s/it]  0%|          | 4/10000 [00:07<4:41:07,  1.69s/it]  0%|          | 5/10000 [00:08<4:31:29,  1.63s/it]  0%|          | 6/10000 [00:10<4:25:38,  1.59s/it]  0%|          | 7/10000 [00:11<4:21:49,  1.57s/it]  0%|          | 8/10000 [00:13<4:19:24,  1.56s/it]  0%|          | 9/10000 [00:14<4:17:52,  1.55s/it]  0%|          | 10/10000 [00:16<4:16:46,  1.54s/it]  0%|          | 11/10000 [00:17<4:16:02,  1.54s/it]  0%|          | 12/10000 [00:19<4:15:20,  1.53s/it]  0%|          | 13/10000 [00:21<4:15:09,  1.53s/it]  0%|          | 14/10000 [00:22<4:14:55,  1.53s/it]  0%|          | 15/10000 [00:24<4:14:50,  1.53s/it]  0%|          | 16/10000 [00:25<4:14:23,  1.53s/it]  0%|          | 17/10000 [00:27<4:14:15,  1.53s/it]  0%|          | 18/10000 [00:28<4:14:20,  1.53s/it]  0%|          | 19/10000 [00:29<3:29:05,  1.26s/it]  0%|          | 20/10000 [00:31<3:50:55,  1.39s/it]  0%|          | 21/10000 [00:32<3:58:09,  1.43s/it]  0%|          | 22/10000 [00:34<4:02:53,  1.46s/it]  0%|          | 23/10000 [00:35<4:06:21,  1.48s/it]  0%|          | 24/10000 [00:37<4:08:47,  1.50s/it]  0%|          | 25/10000 [00:38<4:10:16,  1.51s/it]  0%|          | 26/10000 [00:40<4:11:20,  1.51s/it]  0%|          | 27/10000 [00:41<4:12:16,  1.52s/it]  0%|          | 28/10000 [00:43<4:13:05,  1.52s/it]  0%|          | 29/10000 [00:44<4:13:22,  1.52s/it]  0%|          | 30/10000 [00:46<4:13:38,  1.53s/it]  0%|          | 31/10000 [00:47<4:13:42,  1.53s/it]  0%|          | 32/10000 [00:49<4:13:52,  1.53s/it]  0%|          | 33/10000 [00:50<4:14:03,  1.53s/it]  0%|          | 34/10000 [00:52<4:14:01,  1.53s/it]  0%|          | 35/10000 [00:53<4:13:51,  1.53s/it]  0%|          | 36/10000 [00:55<4:14:02,  1.53s/it]  0%|          | 37/10000 [00:57<4:14:07,  1.53s/it]  0%|          | 38/10000 [00:57<3:29:59,  1.26s/it]  0%|          | 39/10000 [00:59<3:54:08,  1.41s/it]  0%|          | 40/10000 [01:00<3:59:43,  1.44s/it]  0%|          | 41/10000 [01:02<4:03:30,  1.47s/it]  0%|          | 42/10000 [01:03<4:06:12,  1.48s/it]  0%|          | 43/10000 [01:05<4:08:10,  1.50s/it]  0%|          | 44/10000 [01:07<4:09:26,  1.50s/it]  0%|          | 45/10000 [01:08<4:10:29,  1.51s/it]  0%|          | 46/10000 [01:10<4:11:13,  1.51s/it]  0%|          | 47/10000 [01:11<4:11:42,  1.52s/it]  0%|          | 48/10000 [01:13<4:12:00,  1.52s/it]  0%|          | 49/10000 [01:14<4:12:19,  1.52s/it]  0%|          | 50/10000 [01:16<4:12:50,  1.52s/it]                                                    {'loss': 2.5079, 'grad_norm': 0.7212837934494019, 'learning_rate': 1.9600000000000002e-05, 'epoch': 2.65}
-  0%|          | 50/10000 [01:16<4:12:50,  1.52s/it]  1%|          | 51/10000 [01:17<4:13:08,  1.53s/it]  1%|          | 52/10000 [01:19<4:13:00,  1.53s/it]  1%|          | 53/10000 [01:20<4:13:24,  1.53s/it]  1%|          | 54/10000 [01:22<4:13:33,  1.53s/it]  1%|          | 55/10000 [01:23<4:13:42,  1.53s/it]  1%|          | 56/10000 [01:25<4:13:42,  1.53s/it]  1%|          | 57/10000 [01:26<3:29:38,  1.27s/it]  1%|          | 58/10000 [01:27<3:51:11,  1.40s/it]  1%|          | 59/10000 [01:29<3:58:13,  1.44s/it]  1%|          | 60/10000 [01:30<4:02:50,  1.47s/it]  1%|          | 61/10000 [01:32<4:06:02,  1.49s/it]  1%|          | 62/10000 [01:33<4:08:23,  1.50s/it]  1%|          | 63/10000 [01:35<4:10:07,  1.51s/it]  1%|          | 64/10000 [01:36<4:11:14,  1.52s/it]  1%|          | 65/10000 [01:38<4:11:57,  1.52s/it]  1%|          | 66/10000 [01:39<4:12:36,  1.53s/it]  1%|          | 67/10000 [01:41<4:13:04,  1.53s/it]  1%|          | 68/10000 [01:43<4:13:08,  1.53s/it]  1%|          | 69/10000 [01:44<4:13:25,  1.53s/it]  1%|          | 70/10000 [01:46<4:13:24,  1.53s/it]  1%|          | 71/10000 [01:47<4:13:45,  1.53s/it]  1%|          | 72/10000 [01:49<4:13:51,  1.53s/it]  1%|          | 73/10000 [01:50<4:13:47,  1.53s/it]  1%|          | 74/10000 [01:52<4:13:40,  1.53s/it]  1%|          | 75/10000 [01:53<4:13:48,  1.53s/it]  1%|          | 76/10000 [01:54<3:29:44,  1.27s/it]  1%|          | 77/10000 [01:56<3:50:58,  1.40s/it]  1%|          | 78/10000 [01:57<3:58:50,  1.44s/it]  1%|          | 79/10000 [01:59<4:03:11,  1.47s/it]  1%|          | 80/10000 [02:00<4:06:12,  1.49s/it]  1%|          | 81/10000 [02:02<4:08:15,  1.50s/it]  1%|          | 82/10000 [02:03<4:09:54,  1.51s/it]  1%|          | 83/10000 [02:05<4:11:06,  1.52s/it]  1%|          | 84/10000 [02:06<4:11:53,  1.52s/it]  1%|          | 85/10000 [02:08<4:12:15,  1.53s/it]  1%|          | 86/10000 [02:09<4:12:35,  1.53s/it]  1%|          | 87/10000 [02:11<4:12:53,  1.53s/it]  1%|          | 88/10000 [02:13<4:12:51,  1.53s/it]  1%|          | 89/10000 [02:14<4:13:01,  1.53s/it]  1%|          | 90/10000 [02:16<4:13:10,  1.53s/it]  1%|          | 91/10000 [02:17<4:13:11,  1.53s/it]  1%|          | 92/10000 [02:19<4:13:12,  1.53s/it]  1%|          | 93/10000 [02:20<4:13:07,  1.53s/it]  1%|          | 94/10000 [02:22<4:13:11,  1.53s/it]  1%|          | 95/10000 [02:22<3:28:22,  1.26s/it]  1%|          | 96/10000 [02:24<3:50:15,  1.39s/it]  1%|          | 97/10000 [02:26<3:57:24,  1.44s/it]  1%|          | 98/10000 [02:27<4:01:58,  1.47s/it]  1%|          | 99/10000 [02:29<4:05:03,  1.49s/it]  1%|          | 100/10000 [02:30<4:07:44,  1.50s/it]                                                     {'loss': 1.9495, 'grad_norm': 0.45617949962615967, 'learning_rate': 3.960000000000001e-05, 'epoch': 5.27}
-  1%|          | 100/10000 [02:30<4:07:44,  1.50s/it]  1%|          | 101/10000 [02:32<4:09:12,  1.51s/it]  1%|          | 102/10000 [02:33<4:10:28,  1.52s/it]  1%|          | 103/10000 [02:35<4:11:18,  1.52s/it]  1%|          | 104/10000 [02:36<4:11:48,  1.53s/it]  1%|          | 105/10000 [02:38<4:12:09,  1.53s/it]  1%|          | 106/10000 [02:39<4:12:22,  1.53s/it]  1%|          | 107/10000 [02:41<4:12:25,  1.53s/it]  1%|          | 108/10000 [02:42<4:12:17,  1.53s/it]  1%|          | 109/10000 [02:44<4:12:22,  1.53s/it]  1%|          | 110/10000 [02:46<4:12:24,  1.53s/it]  1%|          | 111/10000 [02:47<4:12:24,  1.53s/it]  1%|          | 112/10000 [02:49<4:12:19,  1.53s/it]  1%|          | 113/10000 [02:50<4:12:23,  1.53s/it]  1%|          | 114/10000 [02:51<3:28:13,  1.26s/it]  1%|          | 115/10000 [02:52<3:50:29,  1.40s/it]  1%|          | 116/10000 [02:54<3:57:22,  1.44s/it]  1%|          | 117/10000 [02:56<4:01:54,  1.47s/it]  1%|          | 118/10000 [02:57<4:05:01,  1.49s/it]  1%|          | 119/10000 [02:59<4:07:12,  1.50s/it]  1%|          | 120/10000 [03:00<4:08:51,  1.51s/it]  1%|          | 121/10000 [03:02<4:09:55,  1.52s/it]  1%|          | 122/10000 [03:03<4:10:40,  1.52s/it]  1%|          | 123/10000 [03:05<4:11:19,  1.53s/it]  1%|          | 124/10000 [03:06<4:11:36,  1.53s/it]  1%|▏         | 125/10000 [03:08<4:11:56,  1.53s/it]  1%|▏         | 126/10000 [03:09<4:11:59,  1.53s/it]  1%|▏         | 127/10000 [03:11<4:12:11,  1.53s/it]  1%|▏         | 128/10000 [03:12<4:12:10,  1.53s/it]  1%|▏         | 129/10000 [03:14<4:12:24,  1.53s/it]  1%|▏         | 130/10000 [03:15<4:12:14,  1.53s/it]  1%|▏         | 131/10000 [03:17<4:12:14,  1.53s/it]  1%|▏         | 132/10000 [03:19<4:12:19,  1.53s/it]  1%|▏         | 133/10000 [03:19<3:28:01,  1.27s/it]  1%|▏         | 134/10000 [03:21<3:50:30,  1.40s/it]  1%|▏         | 135/10000 [03:22<3:57:26,  1.44s/it]  1%|▏         | 136/10000 [03:24<4:01:43,  1.47s/it]  1%|▏         | 137/10000 [03:26<4:04:54,  1.49s/it]  1%|▏         | 138/10000 [03:27<4:06:54,  1.50s/it]  1%|▏         | 139/10000 [03:29<4:08:25,  1.51s/it]  1%|▏         | 140/10000 [03:30<4:09:29,  1.52s/it]  1%|▏         | 141/10000 [03:32<4:10:09,  1.52s/it]  1%|▏         | 142/10000 [03:33<4:10:36,  1.53s/it]  1%|▏         | 143/10000 [03:35<4:10:55,  1.53s/it]  1%|▏         | 144/10000 [03:36<4:10:43,  1.53s/it]  1%|▏         | 145/10000 [03:38<4:10:44,  1.53s/it]  1%|▏         | 146/10000 [03:39<4:10:33,  1.53s/it]  1%|▏         | 147/10000 [03:41<4:10:27,  1.53s/it]  1%|▏         | 148/10000 [03:42<4:10:27,  1.53s/it]  1%|▏         | 149/10000 [03:44<4:10:14,  1.52s/it]  2%|▏         | 150/10000 [03:45<4:10:30,  1.53s/it]                                                     {'loss': 1.7955, 'grad_norm': 0.4550279974937439, 'learning_rate': 5.96e-05, 'epoch': 7.92}
-  2%|▏         | 150/10000 [03:45<4:10:30,  1.53s/it]  2%|▏         | 151/10000 [03:47<4:10:27,  1.53s/it]  2%|▏         | 152/10000 [03:48<3:26:40,  1.26s/it]  2%|▏         | 153/10000 [03:49<3:49:42,  1.40s/it]  2%|▏         | 154/10000 [03:51<3:56:23,  1.44s/it]  2%|▏         | 155/10000 [03:52<4:00:42,  1.47s/it]  2%|▏         | 156/10000 [03:54<4:03:59,  1.49s/it]  2%|▏         | 157/10000 [03:55<4:06:15,  1.50s/it]  2%|▏         | 158/10000 [03:57<4:07:46,  1.51s/it]  2%|▏         | 159/10000 [03:58<4:08:46,  1.52s/it]  2%|▏         | 160/10000 [04:00<4:09:40,  1.52s/it]  2%|▏         | 161/10000 [04:02<4:09:59,  1.52s/it]  2%|▏         | 162/10000 [04:03<4:10:07,  1.53s/it]  2%|▏         | 163/10000 [04:05<4:10:40,  1.53s/it]  2%|▏         | 164/10000 [04:06<4:10:52,  1.53s/it]  2%|▏         | 165/10000 [04:08<4:10:55,  1.53s/it]  2%|▏         | 166/10000 [04:09<4:10:57,  1.53s/it]  2%|▏         | 167/10000 [04:11<4:10:57,  1.53s/it]  2%|▏         | 168/10000 [04:12<4:11:08,  1.53s/it]  2%|▏         | 169/10000 [04:14<4:11:08,  1.53s/it]  2%|▏         | 170/10000 [04:15<4:11:04,  1.53s/it]  2%|▏         | 171/10000 [04:16<3:27:24,  1.27s/it]  2%|▏         | 172/10000 [04:18<3:50:32,  1.41s/it]  2%|▏         | 173/10000 [04:19<3:56:46,  1.45s/it]  2%|▏         | 174/10000 [04:21<4:00:59,  1.47s/it]  2%|▏         | 175/10000 [04:22<4:03:54,  1.49s/it]  2%|▏         | 176/10000 [04:24<4:05:46,  1.50s/it]  2%|▏         | 177/10000 [04:25<4:07:23,  1.51s/it]  2%|▏         | 178/10000 [04:27<4:08:29,  1.52s/it]  2%|▏         | 179/10000 [04:28<4:09:16,  1.52s/it]  2%|▏         | 180/10000 [04:30<4:09:46,  1.53s/it]  2%|▏         | 181/10000 [04:32<4:10:19,  1.53s/it]  2%|▏         | 182/10000 [04:33<4:10:27,  1.53s/it]  2%|▏         | 183/10000 [04:35<4:10:32,  1.53s/it]  2%|▏         | 184/10000 [04:36<4:10:29,  1.53s/it]  2%|▏         | 185/10000 [04:38<4:10:36,  1.53s/it]  2%|▏         | 186/10000 [04:39<4:10:33,  1.53s/it]  2%|▏         | 187/10000 [04:41<4:10:29,  1.53s/it]  2%|▏         | 188/10000 [04:42<4:10:30,  1.53s/it]  2%|▏         | 189/10000 [04:44<4:10:33,  1.53s/it]  2%|▏         | 190/10000 [04:44<3:26:54,  1.27s/it]  2%|▏         | 191/10000 [04:46<3:49:11,  1.40s/it]  2%|▏         | 192/10000 [04:48<3:55:42,  1.44s/it]  2%|▏         | 193/10000 [04:49<3:59:56,  1.47s/it]  2%|▏         | 194/10000 [04:51<4:03:06,  1.49s/it]  2%|▏         | 195/10000 [04:52<4:05:23,  1.50s/it]  2%|▏         | 196/10000 [04:54<4:07:02,  1.51s/it]  2%|▏         | 197/10000 [04:55<4:08:12,  1.52s/it]  2%|▏         | 198/10000 [04:57<4:08:51,  1.52s/it]  2%|▏         | 199/10000 [04:58<4:09:21,  1.53s/it]  2%|▏         | 200/10000 [05:00<4:10:08,  1.53s/it]                                                     {'loss': 1.555, 'grad_norm': 0.3232436776161194, 'learning_rate': 7.960000000000001e-05, 'epoch': 10.54}
-  2%|▏         | 200/10000 [05:00<4:10:08,  1.53s/it]  2%|▏         | 201/10000 [05:02<4:10:16,  1.53s/it]  2%|▏         | 202/10000 [05:03<4:10:11,  1.53s/it]  2%|▏         | 203/10000 [05:05<4:10:22,  1.53s/it]  2%|▏         | 204/10000 [05:06<4:10:28,  1.53s/it]  2%|▏         | 205/10000 [05:08<4:10:31,  1.53s/it]  2%|▏         | 206/10000 [05:09<4:10:33,  1.53s/it]  2%|▏         | 207/10000 [05:11<4:10:29,  1.53s/it]  2%|▏         | 208/10000 [05:12<4:10:26,  1.53s/it]  2%|▏         | 209/10000 [05:13<3:26:33,  1.27s/it]  2%|▏         | 210/10000 [05:15<3:50:19,  1.41s/it]  2%|▏         | 211/10000 [05:16<3:56:11,  1.45s/it]  2%|▏         | 212/10000 [05:18<4:00:08,  1.47s/it]  2%|▏         | 213/10000 [05:19<4:03:04,  1.49s/it]  2%|▏         | 214/10000 [05:21<4:05:15,  1.50s/it]  2%|▏         | 215/10000 [05:22<4:06:49,  1.51s/it]

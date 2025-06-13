@@ -3,11 +3,10 @@
 Usage
 -----
 $ python examine.py \
-    --ckpt_dir ./out_med \
-    --tokenizer_dir ./.hf_llama \
+    --ckpt_dir /u/chizhang/scratch/data/out_shakespeare_tokenflow \
     --batch_size 8
 
-The script loads the model checkpoint produced by the Hugging Face Trainer
+The script loads the model checkpoint produced by the Hugging Face Trainer
 (see train.py), rebuilds the same tokenizer that was used during training,
 and then performs **unconditional** generation using `model.generate()`.
 The decoded text of each sample is printed to stdout so you can visually
@@ -15,6 +14,7 @@ inspect the quality.
 """
 
 import os
+import json
 import argparse
 from pathlib import Path
 
@@ -29,8 +29,6 @@ from model import TokenFlowConfig
 # -----------------------------------------------------------------------------
 from model import TokenFlowModel  # noqa: E402
 
-# python3 examine.py --ckpt_dir ./out_small --tokenizer_dir ./.hf_llama --batch_size 8
-
 
 def parse_args():
     """CLI helper."""
@@ -38,14 +36,8 @@ def parse_args():
     parser.add_argument(
         "--ckpt_dir",
         type=Path,
-        default=Path("./out_med"),
-        help="Directory that contains the `pytorch_model.bin` and `config.json` saved by the Trainer",
-    )
-    parser.add_argument(
-        "--tokenizer_dir",
-        type=Path,
-        default=Path("./.hf_llama"),
-        help="Directory where the Llama tokenizer JSON / sentencepiece model lives (same as training).",
+        required=True,
+        help="Directory that contains the model checkpoint saved by the Trainer",
     )
     parser.add_argument("--batch_size", type=int, default=8, help="Number of unconditional sequences to sample")
     parser.add_argument(
@@ -55,45 +47,104 @@ def parse_args():
         default="cuda" if torch.cuda.is_available() else "cpu",
         help="Computation device",
     )
+    parser.add_argument(
+        "--max_length",
+        type=int,
+        default=None,
+        help="Maximum sequence length for generation (defaults to model's context length)"
+    )
     return parser.parse_args()
+
+
+def load_model_config(ckpt_dir):
+    """Load model configuration from checkpoint directory."""
+    config_path = os.path.join(ckpt_dir, "config.json")
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Could not find config.json in {ckpt_dir}")
+    
+    with open(config_path, 'r') as f:
+        config_dict = json.load(f)
+    
+    # Create TokenFlowConfig from the saved configuration
+    model_config = TokenFlowConfig(
+        ctx_len=config_dict.get("ctx_len", 256),
+        vocab_size=config_dict.get("vocab_size", 32000),
+        dim=config_dict.get("dim", 512),
+        n_heads=config_dict.get("n_heads", 8),
+        n_layers=config_dict.get("n_layers", 8),
+        tie_word_embeddings=config_dict.get("tie_word_embeddings", True),
+        use_causal=config_dict.get("use_causal", False),
+        use_gumbel_flow=config_dict.get("use_gumbel_flow", False),
+    )
+    
+    return model_config
 
 
 def main() -> None:
     args = parse_args()
 
     # ------------------------------------------------------------------
-    # Tokenizer: must be identical to the one used in train.py
+    # Load model configuration from checkpoint
     # ------------------------------------------------------------------
-    tokenizer = LlamaTokenizer.from_pretrained(args.tokenizer_dir)
-    tokenizer.padding_side = "right"
+    print(f"Loading model configuration from {args.ckpt_dir}")
+    model_config = load_model_config(args.ckpt_dir)
     
-    model_config = TokenFlowConfig(
-        blk_num = 8,
-        blk_size = 128,            # <-- change to match your training
-        vocab_size=32000,   # same as you used in training
-        dim=768,           # ...
-        n_heads=6,
-        n_layers=12,
-        tie_word_embeddings=True
-    )
+    print(f"Model config: ctx_len={model_config.ctx_len}, dim={model_config.dim}, "
+          f"n_layers={model_config.n_layers}, n_heads={model_config.n_heads}, "
+          f"use_causal={model_config.use_causal}")
+
+    # ------------------------------------------------------------------
+    # Tokenizer: use appropriate tokenizer based on vocab_size
+    # ------------------------------------------------------------------
+    if model_config.vocab_size == 32000:
+        # LLaMA tokenizer (Shakespeare models)
+        from transformers import LlamaTokenizer
+        tokenizer = LlamaTokenizer.from_pretrained("huggyllama/llama-7b")
+    elif model_config.vocab_size == 50257:
+        # GPT-2 tokenizer (FineWeb models)
+        from transformers import GPT2Tokenizer
+        tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+        tokenizer.pad_token = tokenizer.eos_token
+    else:
+        raise ValueError(f"Unknown vocab_size: {model_config.vocab_size}. Expected 32000 (LLaMA) or 50257 (GPT-2)")
+    
+    tokenizer.padding_side = "right"
 
     # ------------------------------------------------------------------
     # Load model from HF‑style checkpoint directory.
     # ------------------------------------------------------------------
     model_weights_path = os.path.join(args.ckpt_dir, "model.safetensors")
     if not os.path.exists(model_weights_path):
-        raise FileNotFoundError(f"Could not find {model_weights_path}")
+        # Try pytorch_model.bin as fallback
+        model_weights_path = os.path.join(args.ckpt_dir, "pytorch_model.bin")
+        if not os.path.exists(model_weights_path):
+            raise FileNotFoundError(f"Could not find model.safetensors or pytorch_model.bin in {args.ckpt_dir}")
+        
+        # Load from pytorch_model.bin
+        state_dict = torch.load(model_weights_path, map_location="cpu")
+    else:
+        # Load from safetensors
+        state_dict = load_file(model_weights_path)
 
-    state_dict = load_file(model_weights_path)
     print(f"Loading TokenFlow model from {args.ckpt_dir.resolve()}")
     model = TokenFlowModel(model_config)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    
+    if missing:
+        print(f"Warning: Missing keys in state dict: {missing}")
+    if unexpected:
+        print(f"Warning: Unexpected keys in state dict: {unexpected}")
+    
     if hasattr(model, "tie_weights"):
         model.tie_weights() 
-    model.to("cuda")
+    model.to(args.device)
     model.eval()
     
-    time_schedule = np.linspace(0, 1., 128)
+    # Use max_length if provided, otherwise use model's context length
+    max_length = args.max_length if args.max_length is not None else model_config.ctx_len
+    time_schedule = np.linspace(0, 1., max_length)
+
+    print(f"Generating {args.batch_size} samples with max_length={max_length}")
 
     # ------------------------------------------------------------------
     # Perform unconditional generation.

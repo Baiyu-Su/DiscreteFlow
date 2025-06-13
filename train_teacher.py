@@ -39,6 +39,12 @@ def main():
         choices=["shakespeare"],
         help="Dataset to use for training (currently only shakespeare supported)"
     )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default=None,
+        help="Override the output directory from config file"
+    )
     args = parser.parse_args()
 
     # Dynamically import the config file
@@ -46,6 +52,10 @@ def main():
     config_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(config_module)
     cfg = config_module.MyConfig
+    
+    # Override output_dir if provided via command line
+    if args.output_dir is not None:
+        cfg.output_dir = args.output_dir
     
     # Redirect all caches to scratch directory
     CACHE_DIR = "/u/chizhang/scratch/data/.hf/datasets"
@@ -196,6 +206,10 @@ def main():
         torch_compile=False,
         ddp_find_unused_parameters=False,
         save_total_limit=3,
+        # ✅ ADD BEST MODEL SAVING
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
     )
     
     if training_args.process_index == 0:

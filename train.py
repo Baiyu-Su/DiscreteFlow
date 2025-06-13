@@ -125,6 +125,12 @@ def main():
         default=False,
         help="Use causal attention (default: False)"
     )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default=None,
+        help="Override the output directory from config file"
+    )
 
     args = parser.parse_args()
 
@@ -133,6 +139,10 @@ def main():
     config_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(config_module)
     cfg = config_module.MyConfig
+    
+    # Override output_dir if provided via command line
+    if args.output_dir is not None:
+        cfg.output_dir = args.output_dir
     
     # Redirect all caches to scratch directory
     CACHE_DIR = "/u/chizhang/scratch/data/.hf/datasets"
@@ -150,8 +160,18 @@ def main():
     os.environ["HF_HOME"] = HF_CACHE_DIR
     os.environ["HUGGINGFACE_HUB_CACHE"] = f"{HF_CACHE_DIR}/hub"
     
-    # Use HuggingFace LLaMA tokenizer
-    tokenizer = LlamaTokenizer.from_pretrained("huggyllama/llama-7b")
+    # Use dataset-appropriate tokenizer
+    if args.dataset == "shakespeare":
+        # Use LLaMA tokenizer for Shakespeare (matches teacher model)
+        from transformers import LlamaTokenizer
+        tokenizer = LlamaTokenizer.from_pretrained("huggyllama/llama-7b")
+    elif args.dataset == "fineweb":
+        # Use GPT-2 tokenizer for FineWeb (matches GPT-2 teacher model)
+        from transformers import GPT2Tokenizer
+        tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+        tokenizer.pad_token = tokenizer.eos_token  # GPT-2 doesn't have pad token
+    else:
+        raise ValueError(f"Unknown dataset: {args.dataset}")
 
     # 1) download + shuffle + split (all cached by HF under CACHE_DIR)
     if args.dataset == "fineweb":
@@ -254,6 +274,8 @@ def main():
         tie_word_embeddings=cfg.tie_word_embeddings,
         load_stats=cfg.load_stats,
         use_causal=args.causal,
+        use_gumbel_flow=getattr(cfg, 'use_gumbel_flow', False),
+        teacher_model_name=getattr(cfg, 'teacher_model_name', None),
     )
 
     model = TokenFlowModel(model_config)

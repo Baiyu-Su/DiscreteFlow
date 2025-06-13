@@ -6,14 +6,14 @@ class MyConfig:
     load_stats = True
 
     # Model config
-    vocab_size = 32000
+    vocab_size = 50257  # GPT-2 tokenizer vocab size
     dim = 768
     n_heads = 12 # Head dim must be divisible by 128
     n_layers = 12
     tie_word_embeddings = True
     
-    per_device_train_batch_size = 40
-    gradient_accumulation_steps = 10
+    per_device_train_batch_size = 64
+    gradient_accumulation_steps = 4
     
     dataloader_num_workers = 8
     max_steps = 30000

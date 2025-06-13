@@ -221,6 +221,7 @@ class Attention(nn.Module):
         self.dim = config.dim
         self.head_dim = config.dim // config.n_heads
         self.max_batch = config.max_batch
+        self.ctx_len = config.ctx_len
         self.init_cutoff_factor = config.init_cutoff_factor
         self.use_causal = config.use_causal
 
@@ -709,7 +710,9 @@ class TokenFlowModel(PreTrainedModel):
         else:
             model_logits = self.output_proj(h)
 
-        singular_logits = self._compute_singular_logits(xt, t_sample, std=self.embed_scale)
+        # Expand t_sample to match sequence length for _compute_singular_logits
+        t_full = t_sample.repeat(1, seq_len).unsqueeze(-1)  # (B, seq_len, 1)
+        singular_logits = self._compute_singular_logits(xt, t_full, std=self.embed_scale)
         logits = model_logits + singular_logits
 
         return CausalLMOutput(logits=logits)

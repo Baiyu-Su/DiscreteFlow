@@ -6,7 +6,7 @@ class MyConfig:
     load_stats = True
 
     # Model config - same as small_config.py for consistency
-    vocab_size = 32000
+    vocab_size = 50257  # GPT-2 tokenizer vocab size
     dim = 768
     n_heads = 12  # Head dim must be divisible by 128
     n_layers = 12

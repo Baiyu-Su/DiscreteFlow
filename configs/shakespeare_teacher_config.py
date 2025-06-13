@@ -18,13 +18,13 @@ class MyConfig:
     gradient_accumulation_steps = 1  
     
     dataloader_num_workers = 4
-    max_steps = 5000    
-    eval_steps = 100 # Keep frequent because model tends to overfit quickly
+    max_steps = 1000 # Overfits quickly
+    eval_steps = 100 # Keep frequent 
     save_steps = 1000
     logging_steps = 50
 
     # Optimization
-    learning_rate = 4e-4 
+    learning_rate = 3e-4 
     adam_beta2 = 0.98
     weight_decay = 0.02   
          
