@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Union
 import math
 import functools
 
@@ -10,8 +10,6 @@ from torch import Tensor
 
 from transformers import PreTrainedModel, PretrainedConfig
 from transformers.modeling_outputs import CausalLMOutput
-
-from typing import Tuple, Optional, Union
 
 from model_utils import (
     init_normal,
@@ -48,6 +46,7 @@ class TokenFlowConfig(PretrainedConfig):
         use_causal: bool = False,
         # Gumbel reflow parameters
         use_gumbel_flow: bool = False,
+        gumbel_conditioning_type: str = "x0", # "x0" or "cross_attention"
         teacher_model_name: Optional[str] = None,
         freeze_token_embed: bool = False,  # Whether to freeze token embeddings after teacher initialization
         init_from_teacher: bool = False,    # Whether to initialize token embeddings from the teacher model
@@ -72,6 +71,7 @@ class TokenFlowConfig(PretrainedConfig):
         self.norm_eps = norm_eps
         self.load_stats = load_stats
         self.use_gumbel_flow = use_gumbel_flow
+        self.gumbel_conditioning_type = gumbel_conditioning_type
         self.teacher_model_name = teacher_model_name
         self.use_causal = use_causal
         self.freeze_token_embed = freeze_token_embed
@@ -246,7 +246,7 @@ class Attention(nn.Module):
         init_normal(self.wv, std, self.init_cutoff_factor)
         init_normal(self.wo, attn_out_std, self.init_cutoff_factor)
 
-    def forward(self, x: Tensor, start_pos: int, freqs_cis, use_cache=False):
+    def forward(self, x: Tensor, start_pos: int, freqs_cis, use_cache=False, kv_input: Optional[Tensor] = None):
         """
         Args
         ----
@@ -255,9 +255,21 @@ class Attention(nn.Module):
                      (needed only for KV-cache path)
         freqs_cis  : rotary embedding tensor
         use_cache  : whether to use KV caching for inference
+        kv_input   : (B, L, D)
+                     optional input for key and value for cross-attention
+                     if None, performs self-attention
         """
         batch_size, seq_len, _ = x.shape
-        q, k, v = self.wq(x), self.wk(x), self.wv(x)
+
+        q = self.wq(x)
+        if kv_input is not None:
+            # Cross-attention: k and v are from kv_input
+            k = self.wk(kv_input)
+            v = self.wv(kv_input)
+        else:
+            # Self-attention: k and v are from x
+            k = self.wk(x)
+            v = self.wv(x)
 
         # (B, L, H, D_h)
         q = q.view(batch_size, seq_len, self.n_heads,    self.head_dim)
@@ -428,23 +440,29 @@ class TokenFlowBlock(nn.Module):
             layer_id (int): Identifier for the layer.
             config (TokenFlowConfig): Model configuration parameters.
         Attributes:
-            attention (Attention): Attention module.
+            self_attention (Attention): Self-attention module.
+            cross_attention (Attention): Cross-attention module for conditioning.
             feed_forward (FeedForward): FeedForward module.
-            attention_norm (RMSNorm): Layer normalization for attention output.
+            attention_norm (RMSNorm): Layer normalization for self-attention output.
+            cross_attention_norm (RMSNorm): Layer normalization for cross-attention output.
             ffn_norm (RMSNorm): Layer normalization for feedforward output.
             modulation (Modulation): adaLN modulation module.
         """
         super().__init__()
-        self.attention = Attention(layer_id, config)
+        self.self_attention = Attention(layer_id, config)
+        self.cross_attention = Attention(layer_id, config)
         self.feed_forward = FeedForward(layer_id, config)
         self.attention_norm = RMSNorm(config.dim, eps=config.norm_eps)
+        self.cross_attention_norm = RMSNorm(config.dim, eps=config.norm_eps)
         self.ffn_norm = RMSNorm(config.dim, eps=config.norm_eps)
         self.modulation = Modulation(config)
 
     def reset_parameters(self):
-        self.attention.reset_parameters()
+        self.self_attention.reset_parameters()
+        self.cross_attention.reset_parameters()
         self.feed_forward.reset_parameters()
         self.attention_norm.reset_parameters()
+        self.cross_attention_norm.reset_parameters()
         self.ffn_norm.reset_parameters()
         self.modulation.reset_parameters()
     
@@ -454,13 +472,21 @@ class TokenFlowBlock(nn.Module):
         vec: torch.Tensor, 
         start_pos: int, 
         freqs_cis: torch.Tensor, 
-        use_cache: bool = False
+        use_cache: bool = False,
+        gumbel_context: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         mod = self.modulation(vec) # (B, 1, dim)
 
-        x_mod = (1 + mod.scale) * self.attention_norm(x) + mod.shift
-        h = x + self.attention(x_mod, start_pos, freqs_cis, use_cache)
+        # 1. Self-Attention
+        x_mod_self = (1 + mod.scale) * self.attention_norm(x) + mod.shift
+        h = x + self.self_attention(x_mod_self, start_pos, freqs_cis, use_cache)
 
+        # 2. Cross-Attention (only if gumbel_context is provided)
+        if gumbel_context is not None:
+            x_mod_cross = (1 + mod.scale) * self.cross_attention_norm(h) + mod.shift
+            h = h + self.cross_attention(x_mod_cross, start_pos, freqs_cis, use_cache, kv_input=gumbel_context)
+
+        # 3. Feed-Forward
         ffn_out = self.feed_forward(self.ffn_norm(h))
         out = h + mod.gate * ffn_out # broadcast gate over seq len
 
@@ -693,7 +719,17 @@ class TokenFlowModel(PreTrainedModel):
             gumbel_noise = sample_posterior_gumbel(logits, input_ids)  # (B, T, V)
             gumbel_probs = F.softmax(gumbel_noise, dim=-1)  # (B, T, V)
             # Use einsum for efficient matrix multiplication: (B, T, V) @ (V, D) -> (B, T, D)
-            x0 = torch.einsum('btv,vd->btd', gumbel_probs, self.token_embed.weight)
+            gumbel_embeddings = torch.einsum('btv,vd->btd', gumbel_probs, self.token_embed.weight)
+
+            gumbel_context = None
+            if self.config.gumbel_conditioning_type == 'cross_attention':
+                # Use Gaussian noise for x0
+                x0 = torch.randn_like(x1) * self.embed_scale
+                # Use Gumbel embeddings as context, detached from the graph
+                gumbel_context = gumbel_embeddings.detach()
+            else: # 'x0' or default
+                # Use Gumbel embeddings for x0
+                x0 = gumbel_embeddings
         
         # Original path
         else:
@@ -707,7 +743,7 @@ class TokenFlowModel(PreTrainedModel):
         xt = h
 
         for layer in self.layers:
-            h = layer(h, t_vec, start_pos, freqs_cis, use_cache=False)
+            h = layer(h, t_vec, start_pos, freqs_cis, use_cache=False, gumbel_context=gumbel_context)
 
         batch_size_, seq_len_ = labels.shape
         assert batch_size_ == batch_size and seq_len_ == seq_len, f"Labels must match the shape of input {input_ids.shape}. Got {labels.shape}."
@@ -734,7 +770,7 @@ class TokenFlowModel(PreTrainedModel):
         
 
     @torch.inference_mode()
-    def inference_forward(self, h: torch.Tensor, start_pos: int, time: float):
+    def inference_forward(self, h: torch.Tensor, start_pos: int, time: float, gumbel_context: Optional[torch.Tensor] = None):
         """
         Forward pass for inference mode.
         Args:   
@@ -756,7 +792,7 @@ class TokenFlowModel(PreTrainedModel):
         xt = h
 
         for layer in self.layers:
-            h = layer(h, t_vec, start_pos, freqs_cis, use_cache=True)
+            h = layer(h, t_vec, start_pos, freqs_cis, use_cache=True, gumbel_context=gumbel_context)
 
         h = self.final_layer_norm(h)
         if self.tied_word_embeddings:
@@ -799,18 +835,28 @@ class TokenFlowModel(PreTrainedModel):
         total_len = self.ctx_len
         device = self.token_embed.weight.device
 
+        gumbel_context = None
         # Initialize x_t based on whether we're using Gumbel reflow or not
         if self.config.use_gumbel_flow:
-            # Gumbel reflow path
-            gumbel_noise = -torch.log(-torch.log(torch.rand(batch_size, total_len, self.config.vocab_size, device=device) + 1e-20) + 1e-20)
-            gumbel_probs = F.softmax(gumbel_noise, dim=-1)
-            x_t = torch.einsum('btv,vd->btd', gumbel_probs, self.token_embed.weight)
+            if self.config.gumbel_conditioning_type == 'cross_attention':
+                # Sample from the Gumbel prior to create the context
+                gumbel_noise = -torch.log(-torch.log(torch.rand(batch_size, total_len, self.config.vocab_size, device=device) + 1e-20) + 1e-20)
+                gumbel_probs = F.softmax(gumbel_noise, dim=-1)
+                gumbel_context = torch.einsum('btv,vd->btd', gumbel_probs, self.token_embed.weight).detach()
+
+                # Initialize the actual state x_t with Gaussian noise
+                x_t = torch.randn(batch_size, total_len, self.dim, device=device) * self.embed_scale
+            else: # 'x0' or default
+                # Original behavior: sample from Gumbel prior and use for x_t
+                gumbel_noise = -torch.log(-torch.log(torch.rand(batch_size, total_len, self.config.vocab_size, device=device) + 1e-20) + 1e-20)
+                gumbel_probs = F.softmax(gumbel_noise, dim=-1)
+                x_t = torch.einsum('btv,vd->btd', gumbel_probs, self.token_embed.weight)
         else:
             # Original random noise path
             x_t = torch.randn(batch_size, total_len, self.dim, device=device) * self.embed_scale
 
         for i, (time, next_time) in enumerate(zip(time_schedule[:-1], time_schedule[1:])):
-            logits = self.inference_forward(x_t, start_pos=0, time=time).logits
+            logits = self.inference_forward(x_t, start_pos=0, time=time, gumbel_context=gumbel_context).logits
             E = self.token_embed.weight
             probs = torch.softmax(logits, dim=-1)
             x1t = torch.matmul(probs, E)

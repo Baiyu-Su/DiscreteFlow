@@ -10,10 +10,11 @@ class MyConfig:
     dim = 768
     n_heads = 12  # Head dim must be divisible by 128
     n_layers = 16
-    tie_word_embeddings = True  
+    tie_word_embeddings = False  
     
     # Gumbel reflow parameters
     use_gumbel_flow = True
+    gumbel_conditioning_type = "cross_attention" # "x0" or "cross_attention"
     teacher_model_name = "gpt2"  # Small pretrained GPT-2 as teacher (~124M params)
     
     per_device_train_batch_size = 64

@@ -10,10 +10,11 @@ class MyConfig:
     dim = 512
     n_heads = 8
     n_layers = 8
-    tie_word_embeddings = True
+    tie_word_embeddings = False
     
     # Gumbel reflow parameters
     use_gumbel_flow = True
+    gumbel_conditioning_type = "cross_attention" # "x0" or "cross_attention"
     teacher_model_name = "/u/chizhang/scratch/data/out_shakespeare_teacher"  # Path to trained teacher
     
     per_device_train_batch_size = 64  
